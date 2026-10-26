@@ -1,0 +1,33 @@
+[Unit]
+Description=Media Downloader
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mediadl
+Group=mediadl
+WorkingDirectory=/opt/media-downloader
+EnvironmentFile=/opt/media-downloader/.env
+ExecStart=/usr/bin/node src/server.js
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+LockPersonality=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+ReadWritePaths=/opt/media-downloader/data /opt/media-downloader/downloads
+
+[Install]
+WantedBy=multi-user.target

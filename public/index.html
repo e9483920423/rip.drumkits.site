@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <title>rip.drumkits.site</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h1>rip.drumkits.site</h1>
+
+  <section id="banner" class="box" hidden></section>
+
+  <div id="workspace" hidden>
+    <form id="inspect-form" class="box">
+      <h2>link</h2>
+      <label for="url">media url</label>
+      <input id="url" name="url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" spellcheck="false" required>
+      <div class="actions">
+        <button type="button" id="paste">paste</button>
+        <button type="submit" id="inspect">download</button>
+      </div>
+      <p id="form-error" class="error" role="alert" hidden></p>
+    </form>
+
+    <section id="preview" class="box" hidden>
+      <img id="thumb" alt="" hidden>
+      <p id="source" class="muted"></p>
+      <h2 id="title"></h2>
+      <p id="meta" class="muted"></p>
+      <div id="tracks" hidden>
+        <div class="actions">
+          <button type="button" id="select-all">select all</button>
+          <button type="button" id="select-none">select none</button>
+        </div>
+        <p id="track-meta" class="muted"></p>
+        <ul id="track-list" class="tracks"></ul>
+      </div>
+      <label for="format">format</label>
+      <select id="format"></select>
+      <button type="button" id="download">download</button>
+      <p id="preview-error" class="error" role="alert" hidden></p>
+    </section>
+  </div>
+
+  <p class="note">the file is sent to your browser. nothing is kept on this server. pick tracks from a playlist or set and they are zipped.</p>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
