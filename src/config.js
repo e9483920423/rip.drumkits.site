@@ -44,6 +44,18 @@ function executable(env, name, fallback) {
   return value;
 }
 
+function accessToken(env, name) {
+  const value = text(env, name, '');
+  if (!value) return '';
+  if (value.length < 16 || value.length > 128) {
+    throw new Error(`${name} must be 16 to 128 characters`);
+  }
+  if (/[\s\0]/.test(value)) {
+    throw new Error(`${name} must not contain whitespace`);
+  }
+  return value;
+}
+
 export function isLoopbackHost(host) {
   return LOOPBACK.has(String(host).trim().toLowerCase());
 }
@@ -77,6 +89,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     dbPath,
     ytdlpPath: executable(env, 'YTDLP_PATH', 'yt-dlp'),
     ffmpegPath: executable(env, 'FFMPEG_PATH', 'ffmpeg'),
+    spotdlPath: executable(env, 'SPOTDL_PATH', 'spotdl'),
     maxConcurrentJobs: integer(env, 'MAX_CONCURRENT_JOBS', 1, 1, 8),
     maxQueuedJobs: integer(env, 'MAX_QUEUED_JOBS', 10, 1, 100),
     maxFileSizeMb: integer(env, 'MAX_FILE_SIZE_MB', 500, 1, 10240),
@@ -92,6 +105,14 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     workerShutdownSeconds: integer(env, 'WORKER_SHUTDOWN_SECONDS', 10, 1, 120),
     bodyLimitBytes: integer(env, 'BODY_LIMIT_BYTES', 16384, 1024, 65536),
     rateLimitPerMinute: integer(env, 'RATE_LIMIT_PER_MINUTE', 60, 1, 1000),
+    rateLimitInspectPerMinute: integer(env, 'RATE_LIMIT_INSPECT_PER_MINUTE', 30, 1, 1000),
+    rateLimitDownloadPerMinute: integer(env, 'RATE_LIMIT_DOWNLOAD_PER_MINUTE', 10, 1, 1000),
+    minFreeDiskMb: integer(env, 'MIN_FREE_DISK_MB', 512, 0, 102400),
+    accessToken: accessToken(env, 'ACCESS_TOKEN'),
     logLevel,
   };
+}
+
+export function accessTokenRequired(config) {
+  return Boolean(config.accessToken) && !isLoopbackHost(config.host);
 }

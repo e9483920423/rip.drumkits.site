@@ -27,6 +27,9 @@ RestrictSUIDSGID=true
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 UMask=0077
+MemoryMax=2G
+TasksMax=128
+CPUQuota=200%
 ReadWritePaths=/opt/media-downloader/data /opt/media-downloader/downloads
 
 [Install]

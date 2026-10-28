@@ -3,7 +3,7 @@ import { formatsFor, getFormat, publicFormat } from '../services/media.js';
 import { assertJobId, contentDisposition, sanitizeFilename } from '../services/storage.js';
 
 const STREAM_HEADERS = {
-  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com https://i.scdn.co https://mosaic.scdn.co https://*.vimeocdn.com https://*.jtvnw.net https://*.hdslb.com https://*.redd.it https://*.redditmedia.com https://pbs.twimg.com https://*.fbcdn.net https://*.staticflickr.com https://*.dmcdn.net https://*.tedcdn.com https://images.ted.com https://*.bcbits.com; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'x-frame-options': 'DENY',
@@ -24,16 +24,33 @@ function jsonError(reply, error) {
   }
 }
 
-function startAttachment(reply, filename) {
+function startAttachment(reply, filename, size) {
   reply.raw.removeHeader('x-frame-options');
-  reply.raw.writeHead(200, {
+  const headers = {
     'content-type': 'application/octet-stream',
     'x-content-type-options': 'nosniff',
     'referrer-policy': 'no-referrer',
     'cache-control': 'no-store',
     'cross-origin-resource-policy': 'same-origin',
     'content-disposition': contentDisposition(filename),
-  });
+  };
+  if (Number.isFinite(size) && size > 0) {
+    headers['content-length'] = String(Math.floor(size));
+  }
+  reply.raw.writeHead(200, headers);
+}
+
+function requireSourceTools(tools, source, { download } = {}) {
+  if (source === 'spotify') {
+    if (!tools.spotdl) {
+      throw new AppError('tools_missing', 'spotDL is not available on this server.', 503);
+    }
+  } else if (!tools.ytdlp) {
+    throw new AppError('tools_missing', 'yt-dlp is not available on this server.', 503);
+  }
+  if (download && !tools.ffmpeg) {
+    throw new AppError('tools_missing', 'FFmpeg is not available on this server.', 503);
+  }
 }
 
 function readItems(raw, source, max, parse) {
@@ -73,12 +90,10 @@ export function registerMediaRoutes(app, ctx) {
   app.post('/api/media/info', async (request) => {
     const raw = request.body?.url;
     if (typeof raw !== 'string' || raw.length > 2048) {
-      throw new AppError('invalid_url', 'Enter a YouTube or SoundCloud URL.', 400);
+      throw new AppError('invalid_url', 'Enter a supported media URL.', 400);
     }
-    ctx.validation.parse(raw);
-    if (!ctx.tools.ytdlp) {
-      throw new AppError('tools_missing', 'yt-dlp is not available on this server.', 503);
-    }
+    const parsed = ctx.validation.parse(raw);
+    requireSourceTools(ctx.tools, parsed.source);
     const resolved = await ctx.validation.resolve(raw);
     const controller = new AbortController();
     const abort = () => controller.abort();
@@ -114,8 +129,7 @@ export function registerMediaRoutes(app, ctx) {
     }
     const parsed = ctx.validation.parse(rawUrl);
     getFormat(parsed.source, format);
-    if (!ctx.tools.ytdlp) throw new AppError('tools_missing', 'yt-dlp is not available on this server.', 503);
-    if (!ctx.tools.ffmpeg) throw new AppError('tools_missing', 'FFmpeg is not available on this server.', 503);
+    requireSourceTools(ctx.tools, parsed.source, { download: true });
     const items = readItems(request.body?.items, parsed.source, ctx.config.maxZipItems, ctx.validation.parse);
     if (parsed.kind === 'playlist' && !items) {
       throw new AppError('bad_request', 'Select one or more tracks from this playlist.', 400);
@@ -171,12 +185,17 @@ export function registerMediaRoutes(app, ctx) {
 
     reply.hijack();
     let started = false;
+    let expectedBytes = 0;
     try {
+      ctx.storage.assertFreeDisk(ticket.mode === 'zip' ? ctx.config.maxZipSizeMb : ctx.config.maxFileSizeMb);
       ctx.storage.createWorkDir(id);
       const hooks = {
+        onReady({ bytes } = {}) {
+          if (Number.isFinite(bytes) && bytes > 0) expectedBytes = bytes;
+        },
         onFirstByte(chunk) {
           started = true;
-          startAttachment(reply, filename);
+          startAttachment(reply, filename, expectedBytes);
           reply.raw.write(chunk);
         },
         write(chunk) {

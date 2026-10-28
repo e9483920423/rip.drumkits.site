@@ -15,9 +15,31 @@ test('validates requests, streams a file, and hides internals', async () => {
     assert.equal(page.statusCode, 200);
     assert.match(page.body, /rip\.drumkits\.site/);
     assert.match(page.body, /src="\/app.js"/);
+    assert.match(page.body, /id="inspect"/);
+    assert.match(page.body, /class="inspect-label">inspect</);
+    assert.match(page.body, /class="download-label">download</);
+    assert.match(page.body, /id="rym"/);
+    assert.match(page.body, /find cover on RYM/);
+    const client = await ctx.app.inject({ method: 'GET', url: '/app.js' });
+    assert.equal(client.statusCode, 200);
+    assert.match(client.body, /site:rateyourmusic\.com/);
+    assert.match(page.body, /what sites this support\?/);
+    assert.match(page.body, /PeerTube/);
+    assert.match(page.body, /Bandcamp/);
+    assert.match(page.body, /thousand extractors/i);
     assert.doesNotMatch(page.body, /unpkg|googleapis|cdnjs/);
     assert.match(page.headers['content-security-policy'], /default-src 'self'/);
+    assert.match(page.headers['content-security-policy'], /font-src 'self'/);
     assert.equal(page.headers['x-frame-options'], 'DENY');
+
+    const css = await ctx.app.inject({ method: 'GET', url: '/styles.css' });
+    assert.equal(css.statusCode, 200);
+    assert.match(css.body, /JetBrains Mono/);
+    assert.doesNotMatch(css.body, /unpkg|googleapis|cdnjs|fonts\.gstatic/);
+    const font = await ctx.app.inject({ method: 'GET', url: '/fonts/JetBrainsMono-Regular.woff2' });
+    assert.equal(font.statusCode, 200);
+    assert.match(font.headers['content-type'], /font\/woff2/);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/fonts/../index.html' })).statusCode, 404);
 
     const missing = await call(ctx.app, 'POST', '/api/media/info', { body: {} });
     assert.equal(missing.statusCode, 400);
@@ -53,6 +75,7 @@ test('validates requests, streams a file, and hides internals', async () => {
     assert.match(file.headers['content-disposition'], /attachment;/);
     assert.equal(file.headers['content-disposition'].includes('\n'), false);
     assert.equal(file.headers['content-type'], 'application/octet-stream');
+    assert.equal(file.headers['content-length'], String(file.rawPayload.length));
     assert.equal(file.rawPayload.subarray(4, 8).toString('ascii'), 'ftyp');
     assert.equal(fs.existsSync(path.join(ctx.config.tmpDir, ticket)), false);
     const leftover = fs.existsSync(ctx.config.downloadDir)
@@ -96,6 +119,7 @@ test('rejects cross-site state changes without the media request header', async 
     const health = await ctx.app.inject({ method: 'GET', url: '/api/health' });
     assert.equal(health.statusCode, 200);
     assert.equal(health.json().ok, true);
+    assert.equal(health.json().auth.required, false);
 
     const crossSite = await ctx.app.inject({
       method: 'POST',
@@ -143,7 +167,11 @@ test('rate limit and oversized bodies return sanitized errors', async () => {
 });
 
 test('starts when yt-dlp and FFmpeg are missing', async () => {
-  const space = workspace({ YTDLP_PATH: 'md-missing-ytdlp', FFMPEG_PATH: 'md-missing-ffmpeg' });
+  const space = workspace({
+    YTDLP_PATH: 'md-missing-ytdlp',
+    FFMPEG_PATH: 'md-missing-ffmpeg',
+    SPOTDL_PATH: 'md-missing-spotdl',
+  });
   const ctx = await createApp({
     config: space.config,
     validation: validationWith(),
@@ -153,8 +181,10 @@ test('starts when yt-dlp and FFmpeg are missing', async () => {
     const health = await ctx.app.inject({ method: 'GET', url: '/api/health' });
     assert.equal(health.statusCode, 200);
     assert.equal(health.json().ok, true);
+    assert.equal(health.json().auth.required, false);
     assert.equal(health.json().tools.ytdlp, false);
     assert.equal(health.json().tools.ffmpeg, false);
+    assert.equal(health.json().tools.spotdl, false);
     const info = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
     assert.equal(info.statusCode, 503);
     assert.match(info.json().error.message, /yt-dlp/);
@@ -267,6 +297,146 @@ test('inspects a playlist, downloads one track, and zips two tracks', async () =
     assert.match(zip.headers['content-disposition'], /\.zip/);
     assert.equal(zip.rawPayload.subarray(0, 2).toString('ascii'), 'PK');
     assert.equal(fs.existsSync(path.join(ctx.config.tmpDir, two.json().ticket)), false);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('inspects a Spotify album and rejects video formats', async () => {
+  const album = 'https://open.spotify.com/album/4yP0hdKOZPNshxUOjY0cZj';
+  const track = 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT';
+  const second = 'https://open.spotify.com/track/0VjIjW4KwNqL3esKw4oRpg';
+  const ctx = await testApp({}, {
+    media: mockMedia({
+      async inspect() {
+        return {
+          kind: 'playlist',
+          title: 'After Hours',
+          uploader: 'The Weeknd',
+          durationSeconds: null,
+          thumbnailUrl: 'https://i.scdn.co/image/ab67616d0000b273fixture',
+          truncated: false,
+          entries: [
+            { id: '4cOdK2wGLETKBW3PvgPWqT', title: 'The Weeknd - Blinding Lights', durationSeconds: 12, url: track },
+            { id: '0VjIjW4KwNqL3esKw4oRpg', title: 'The Weeknd - Save Your Tears', durationSeconds: 8, url: second },
+          ],
+        };
+      },
+    }),
+  });
+  try {
+    const info = await call(ctx.app, 'POST', '/api/media/info', { body: { url: album } });
+    assert.equal(info.statusCode, 200);
+    assert.equal(info.json().kind, 'playlist');
+    assert.equal(info.json().source, 'spotify');
+    assert.equal(info.json().formats.some((format) => format.id === 'mp4'), false);
+    assert.ok(info.json().formats.some((format) => format.id === 'opus'));
+
+    const video = await call(ctx.app, 'POST', '/api/media/download', {
+      body: { url: album, format: 'mp4', items: [{ url: track, title: 'One' }] },
+    });
+    assert.equal(video.statusCode, 400);
+
+    const created = await call(ctx.app, 'POST', '/api/media/download', {
+      body: { url: album, format: 'audio', title: 'After Hours', items: [{ url: track, title: 'One' }] },
+    });
+    assert.equal(created.statusCode, 200);
+    const file = await call(ctx.app, 'GET', `/api/media/download/${created.json().ticket}`);
+    assert.equal(file.statusCode, 200);
+    assert.match(file.headers['content-disposition'], /One\.m4a/);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('Spotify URLs need spotDL even when yt-dlp is present', async () => {
+  const ctx = await testApp({}, { tools: { ytdlp: true, ffmpeg: true, spotdl: false } });
+  try {
+    const info = await call(ctx.app, 'POST', '/api/media/info', {
+      body: { url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT' },
+    });
+    assert.equal(info.statusCode, 503);
+    assert.match(info.json().error.message, /spotDL/);
+    const youtube = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
+    assert.equal(youtube.statusCode, 200);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('inspect and download use separate rate limits', async () => {
+  const ctx = await testApp({
+    RATE_LIMIT_PER_MINUTE: '600',
+    RATE_LIMIT_INSPECT_PER_MINUTE: '1',
+    RATE_LIMIT_DOWNLOAD_PER_MINUTE: '600',
+  });
+  try {
+    const first = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
+    assert.equal(first.statusCode, 200);
+    const blocked = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
+    assert.equal(blocked.statusCode, 429);
+    const created = await call(ctx.app, 'POST', '/api/media/download', {
+      body: { url: VIDEO, format: 'audio' },
+    });
+    assert.equal(created.statusCode, 200);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('ACCESS_TOKEN is required on a public bind when set', async () => {
+  const token = 'shared-secret-16';
+  const ctx = await testApp({ HOST: '0.0.0.0', ACCESS_TOKEN: token });
+  try {
+    const health = await ctx.app.inject({ method: 'GET', url: '/api/health' });
+    assert.equal(health.statusCode, 200);
+    assert.equal(health.json().auth.required, true);
+
+    const missing = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
+    assert.equal(missing.statusCode, 401);
+
+    const wrong = await call(ctx.app, 'POST', '/api/media/info', {
+      body: { url: VIDEO },
+      headers: { 'x-access-token': 'wrong-token-16xxx' },
+    });
+    assert.equal(wrong.statusCode, 401);
+
+    const header = await call(ctx.app, 'POST', '/api/media/info', {
+      body: { url: VIDEO },
+      headers: { 'x-access-token': token },
+    });
+    assert.equal(header.statusCode, 200);
+
+    const queried = await call(ctx.app, 'POST', `/api/media/info?token=${token}`, {
+      body: { url: VIDEO },
+    });
+    assert.equal(queried.statusCode, 200);
+
+    const bearer = await call(ctx.app, 'POST', '/api/media/download', {
+      body: { url: VIDEO, format: 'audio' },
+      headers: { authorization: `Bearer ${token}` },
+    });
+    assert.equal(bearer.statusCode, 200);
+    const ticket = bearer.json().ticket;
+    const file = await call(ctx.app, 'GET', `/api/media/download/${ticket}`);
+    assert.equal(file.statusCode, 200);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('loopback ignores ACCESS_TOKEN', async () => {
+  const ctx = await testApp({ HOST: '127.0.0.1', ACCESS_TOKEN: 'shared-secret-16' });
+  try {
+    const health = await ctx.app.inject({ method: 'GET', url: '/api/health' });
+    assert.equal(health.json().auth.required, false);
+    const info = await call(ctx.app, 'POST', '/api/media/info', { body: { url: VIDEO } });
+    assert.equal(info.statusCode, 200);
   } finally {
     await ctx.close();
     ctx.space.remove();

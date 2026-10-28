@@ -68,3 +68,19 @@ test('cleanup removes stale temp directories and leaves active work alone', () =
   assert.equal(fs.existsSync(staleDir), false);
   space.remove();
 });
+
+test('refuses work when free temp disk is below the floor', () => {
+  const space = workspace({ MIN_FREE_DISK_MB: '512' });
+  const storage = createStorage(space.config, { freeBytes: () => 1024 });
+  storage.ensureDirs();
+  assert.throws(() => storage.assertFreeDisk(), /disk space/);
+  const skipped = createStorage(space.config, {
+    freeBytes: () => {
+      throw new Error('statfs unavailable');
+    },
+  });
+  assert.doesNotThrow(() => skipped.assertFreeDisk());
+  const plenty = createStorage(space.config, { freeBytes: () => 2 * 1024 * 1024 * 1024 });
+  assert.doesNotThrow(() => plenty.assertFreeDisk());
+  space.remove();
+});

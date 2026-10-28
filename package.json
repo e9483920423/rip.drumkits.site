@@ -1,7 +1,7 @@
 {
   "name": "media-downloader",
   "version": "1.0.0",
-  "description": "Open-source YouTube and SoundCloud downloader. Stream files to the browser; nothing is kept on the server.",
+  "description": "Open-source media downloader for YouTube, SoundCloud, Spotify, and other allowlisted yt-dlp sites. Stream files to the browser; nothing is kept on the server.",
   "license": "MIT",
   "repository": {
     "type": "git",

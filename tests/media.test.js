@@ -8,12 +8,15 @@ import {
   buildFileArgs,
   buildStreamArgs,
   buildInfoArgs,
+  buildSpotifyDownloadArgs,
+  buildSpotifySaveArgs,
   classifyProcessFailure,
   createMediaService,
   formatsFor,
   isSuccessfulStreamResult,
   parseInfoPayload,
   parseProgressLine,
+  parseSpotifySavePayload,
 } from '../src/services/media.js';
 
 const config = loadConfig({ LOG_LEVEL: 'silent', MAX_DURATION_SECONDS: '30', MAX_FILE_SIZE_MB: '1' }, process.cwd());
@@ -51,8 +54,30 @@ test('metadata and download arguments stay on a fixed allowlist', () => {
 
   const youtubeIds = formatsFor('youtube').map((item) => item.id);
   const soundcloudIds = formatsFor('soundcloud').map((item) => item.id);
+  const spotifyIds = formatsFor('spotify').map((item) => item.id);
   assert.deepEqual(youtubeIds, ['audio', 'mp3', 'opus', 'flac', 'mp4', 'mp4-720']);
   assert.deepEqual(soundcloudIds, ['audio', 'mp3', 'opus', 'flac']);
+  assert.deepEqual(formatsFor('vimeo').map((item) => item.id), youtubeIds);
+  assert.deepEqual(formatsFor('bandcamp').map((item) => item.id), soundcloudIds);
+  assert.deepEqual(spotifyIds, ['audio', 'mp3', 'opus', 'flac']);
+  const spotifySave = buildSpotifySaveArgs('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
+  assert.equal(spotifySave[0], 'save');
+  assert.equal(spotifySave[spotifySave.indexOf('--save-file') + 1], '-');
+  assert.equal(spotifySave.some((arg) => /cookie|proxy|preload|yt-dlp-args/i.test(arg)), false);
+  const spotifyDl = buildSpotifyDownloadArgs(config, {
+    url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+    formatId: 'opus',
+    output: '01.{output-ext}',
+  });
+  assert.equal(spotifyDl.args[0], 'download');
+  assert.equal(spotifyDl.args[spotifyDl.args.indexOf('--format') + 1], 'opus');
+  assert.equal(spotifyDl.args[spotifyDl.args.indexOf('--output') + 1], '01.{output-ext}');
+  assert.equal(spotifyDl.args.some((arg) => /cookie|proxy|preload|yt-dlp-args/i.test(arg)), false);
+  assert.throws(() => buildSpotifyDownloadArgs(config, {
+    url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+    formatId: 'mp4',
+    output: '01.{output-ext}',
+  }), /format/);
   const opus = buildStreamArgs(config, { url, formatId: 'opus', source: 'youtube' });
   assert.equal(opus.args[opus.args.indexOf('--audio-format') + 1], 'opus');
   const flac = buildStreamArgs(config, { url, formatId: 'flac', source: 'soundcloud' });
@@ -121,6 +146,8 @@ test('parses metadata, progress, and process failures', () => {
   assert.equal(classifyProcessFailure({ code: 1, stderr: 'ERROR: Video unavailable' }).code, 'unavailable');
   assert.equal(classifyProcessFailure({ code: 1, stderr: 'Private video' }).code, 'restricted');
   assert.equal(classifyProcessFailure({ code: 'ENOENT' }).message.includes('yt-dlp'), true);
+  assert.equal(classifyProcessFailure({ code: 'ENOENT' }, 'spotdl').message.includes('spotDL'), true);
+  assert.equal(classifyProcessFailure({ code: 1, stderr: "Couldn't get metadata" }).code, 'unavailable');
   assert.equal(classifyProcessFailure({ code: 1, stderr: 'secret /var/lib/app' }).message.includes('/var'), false);
   assert.equal(isSuccessfulStreamResult({ code: 0, started: true }), true);
   assert.equal(isSuccessfulStreamResult({
@@ -180,33 +207,127 @@ test('parses metadata, progress, and process failures', () => {
     ],
   }), 'soundcloud', config, { kind: 'playlist' });
   assert.equal(soundcloud.entries.length, 3);
+
+  const bandcamp = parseInfoPayload(JSON.stringify({
+    _type: 'playlist',
+    id: 'copacetic',
+    title: 'Copacetic',
+    extractor_key: 'BandcampAlbum',
+    entries: [
+      {
+        id: '1',
+        title: 'Pretty Sister',
+        duration: 12,
+        artist: 'Velocity Girl',
+        uploader: 'Velocity Girl',
+        thumbnail: 'https://f4.bcbits.com/img/a1234567890_16.jpg',
+        webpage_url: 'https://velocitygirl.bandcamp.com/track/pretty-sister',
+      },
+    ],
+  }), 'bandcamp', config, { kind: 'playlist' });
+  assert.equal(bandcamp.uploader, 'Velocity Girl');
+  assert.equal(bandcamp.thumbnailUrl, 'https://f4.bcbits.com/img/a1234567890_16.jpg');
+
+  const bandcampBlocked = parseInfoPayload(JSON.stringify({
+    _type: 'playlist',
+    id: 'copacetic',
+    title: 'Copacetic',
+    extractor_key: 'BandcampAlbum',
+    entries: [
+      {
+        id: '1',
+        title: 'Pretty Sister',
+        duration: 12,
+        artist: 'Velocity Girl',
+        thumbnail: 'https://evil.example/a.jpg',
+        webpage_url: 'https://velocitygirl.bandcamp.com/track/pretty-sister',
+      },
+    ],
+  }), 'bandcamp', config, { kind: 'playlist' });
+  assert.equal(bandcampBlocked.thumbnailUrl, null);
   assert.equal(soundcloud.entries[0].title, 'hammer tyme');
   assert.equal(soundcloud.entries[0].durationSeconds, 12);
   assert.equal(soundcloud.entries[1].title, 'weird life');
   assert.equal(soundcloud.entries[1].durationSeconds, 8);
   assert.equal(soundcloud.entries[2].title, 'kiss or kill');
   assert.equal(soundcloud.entries[2].url, 'https://soundcloud.com/swords2/kiss-or-kill');
+
+  const spotifyTrack = parseSpotifySavePayload(JSON.stringify([{
+    name: 'Blinding Lights',
+    artist: 'The Weeknd',
+    duration: 12,
+    song_id: '4cOdK2wGLETKBW3PvgPWqT',
+    url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT?si=abc',
+    cover_url: 'https://i.scdn.co/image/ab67616d0000b273fixture',
+    album_name: 'After Hours',
+  }]), config);
+  assert.equal(spotifyTrack.kind, 'video');
+  assert.equal(spotifyTrack.title, 'The Weeknd - Blinding Lights');
+  assert.equal(spotifyTrack.thumbnailUrl, 'https://i.scdn.co/image/ab67616d0000b273fixture');
+  assert.equal(spotifyTrack.videoId, '4cOdK2wGLETKBW3PvgPWqT');
+
+  const spotifyAlbum = parseSpotifySavePayload(JSON.stringify([
+    {
+      name: 'One',
+      artist: 'Fixture',
+      duration: 12,
+      song_id: '4cOdK2wGLETKBW3PvgPWqT',
+      cover_url: 'https://i.scdn.co/image/ab67616d0000b273fixture',
+      album_name: 'Fixture Album',
+      list_name: 'Fixture Album',
+    },
+    {
+      name: 'Two',
+      artist: 'Fixture',
+      duration: 8,
+      song_id: '0VjIjW4KwNqL3esKw4oRpg',
+      album_name: 'Fixture Album',
+    },
+    {
+      name: 'Long',
+      artist: 'Fixture',
+      duration: 999,
+      song_id: '7ouMYWpwJ422jRcKUUsjMg',
+    },
+  ]), config, { kind: 'playlist' });
+  assert.equal(spotifyAlbum.kind, 'playlist');
+  assert.equal(spotifyAlbum.title, 'Fixture Album');
+  assert.equal(spotifyAlbum.entries.length, 2);
+  assert.equal(spotifyAlbum.entries[0].url, 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
+  assert.equal(spotifyAlbum.entries[1].title, 'Fixture - Two');
 });
 
 test('keeps a finished yt-dlp stream when the process exits 101', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-101-'));
   const service = createMediaService(config, {
-    streamProcess: async () => ({
-      code: 101,
-      started: true,
-      bytes: 2048,
-      stderr: '[download] Destination: -\n[download] Download completed\n[info] Maximum number of downloads reached, stopping due to --max-downloads\nAborting remaining downloads\n',
-    }),
+    runProcess: async (_command, args, options) => {
+      const output = args[args.indexOf('-o') + 1];
+      const dest = path.join(options.cwd, String(output).replace('%(ext)s', 'mp4'));
+      const buf = Buffer.alloc(32, 0);
+      buf.writeUInt32BE(24, 0);
+      buf.write('ftyp', 4, 'ascii');
+      buf.write('isom', 8, 'ascii');
+      fs.writeFileSync(dest, buf);
+      return {
+        code: 101,
+        stderr: '[download] Destination: 01.mp4\n[download] Download completed\n[info] Maximum number of downloads reached, stopping due to --max-downloads\nAborting remaining downloads\n',
+      };
+    },
   });
-  const result = await service.stream({
-    url,
-    source: 'youtube',
-    format: 'mp4',
-    workDir: '.',
-    onFirstByte() {},
-    write() {},
-  });
-  assert.equal(result.bytes, 2048);
-  assert.equal(result.ext, 'mp4');
+  try {
+    const result = await service.stream({
+      url,
+      source: 'youtube',
+      format: 'mp4',
+      workDir: dir,
+      onFirstByte() {},
+      write() {},
+    });
+    assert.equal(result.ext, 'mp4');
+    assert.ok(result.bytes > 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('zips two finished files and keeps a valid archive', async () => {
@@ -239,6 +360,40 @@ test('zips two finished files and keeps a valid archive', async () => {
     assert.equal(result.ext, 'zip');
     const zip = Buffer.concat(chunks);
     assert.equal(zip.subarray(0, 2).toString('ascii'), 'PK');
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('streams a Spotify file written by spotDL', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-spot-'));
+  const service = createMediaService({ ...config, spotdlPath: 'spotdl', ffmpegPath: 'ffmpeg' }, {
+    runProcess: async (command, args, options) => {
+      assert.equal(command, 'spotdl');
+      assert.equal(args[0], 'download');
+      assert.equal(args.some((arg) => /cookie|proxy|preload|yt-dlp-args/i.test(arg)), false);
+      const output = args[args.indexOf('--output') + 1];
+      const dest = path.join(options.cwd, String(output).replace('{output-ext}', 'm4a'));
+      const buf = Buffer.alloc(32, 0);
+      buf.writeUInt32BE(24, 0);
+      buf.write('ftyp', 4, 'ascii');
+      buf.write('isom', 8, 'ascii');
+      fs.writeFileSync(dest, buf);
+      return { code: 0, stdout: '', stderr: '' };
+    },
+  });
+  try {
+    const chunks = [];
+    const result = await service.stream({
+      url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+      source: 'spotify',
+      format: 'audio',
+      workDir: dir,
+      onFirstByte(chunk) { chunks.push(chunk); },
+      write(chunk) { chunks.push(chunk); },
+    });
+    assert.equal(result.ext, 'm4a');
+    assert.equal(Buffer.concat(chunks).subarray(4, 8).toString('ascii'), 'ftyp');
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

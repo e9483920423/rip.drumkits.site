@@ -2,12 +2,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import Fastify from 'fastify';
-import { loadConfig } from './config.js';
+import { accessTokenRequired, isLoopbackHost, loadConfig } from './config.js';
 import { AppError } from './errors.js';
 import { createLogger } from './logger.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { createMediaService } from './services/media.js';
-import { createRateLimiter } from './services/rate-limit.js';
+import { accessTokenMatches, readAccessToken } from './services/access-token.js';
+import { createRateLimiter, limitForPath } from './services/rate-limit.js';
 import { createStorage, isInside } from './services/storage.js';
 import { createStreamManager } from './services/streams.js';
 import { createValidation } from './services/validation.js';
@@ -16,7 +17,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const publicDir = path.join(rootDir, 'public');
 
 const SECURITY_HEADERS = {
-  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com; style-src 'self'; script-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com https://i.scdn.co https://mosaic.scdn.co https://*.vimeocdn.com https://*.jtvnw.net https://*.hdslb.com https://*.redd.it https://*.redditmedia.com https://pbs.twimg.com https://*.fbcdn.net https://*.staticflickr.com https://*.dmcdn.net https://*.tedcdn.com https://images.ted.com https://*.bcbits.com; style-src 'self'; script-src 'self'; font-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'x-frame-options': 'DENY',
@@ -51,8 +52,16 @@ export async function createApp(options = {}) {
     now: options.now,
   });
   const tools = options.tools || await media.probe();
-  if (!tools.ytdlp || !tools.ffmpeg) {
-    log.warn('media tools unavailable', { ytdlp: Boolean(tools.ytdlp), ffmpeg: Boolean(tools.ffmpeg) });
+  if (!tools.ytdlp || !tools.ffmpeg || !tools.spotdl) {
+    log.warn('media tools unavailable', {
+      ytdlp: Boolean(tools.ytdlp),
+      ffmpeg: Boolean(tools.ffmpeg),
+      spotdl: Boolean(tools.spotdl),
+    });
+  }
+  const tokenRequired = accessTokenRequired(config);
+  if (!isLoopbackHost(config.host) && !config.accessToken) {
+    log.warn('public bind has no ACCESS_TOKEN; anyone who can reach the host can start downloads');
   }
 
   const app = Fastify({
@@ -61,16 +70,30 @@ export async function createApp(options = {}) {
     trustProxy: false,
     requestTimeout: (config.jobTimeoutSeconds + 60) * 1000,
   });
-  const limit = createRateLimiter({
-    limit: config.rateLimitPerMinute,
-    windowMs: 60_000,
-    now: options.now,
-  });
+  const limits = {
+    general: createRateLimiter({
+      limit: config.rateLimitPerMinute,
+      windowMs: 60_000,
+      now: options.now,
+    }),
+    inspect: createRateLimiter({
+      limit: config.rateLimitInspectPerMinute,
+      windowMs: 60_000,
+      now: options.now,
+    }),
+    download: createRateLimiter({
+      limit: config.rateLimitDownloadPerMinute,
+      windowMs: 60_000,
+      now: options.now,
+    }),
+  };
 
   app.addHook('onRequest', async (request, reply) => {
     for (const [name, value] of Object.entries(SECURITY_HEADERS)) reply.header(name, value);
     if (!request.url.startsWith('/api/')) return;
-    if (!limit(request.ip || 'local')) {
+    const pathname = String(request.url).split('?')[0];
+    const bucket = limits[limitForPath(pathname)] || limits.general;
+    if (!bucket(request.ip || 'local')) {
       reply.header('retry-after', '60');
       throw new AppError('rate_limited', 'Too many requests. Try again in a minute.', 429);
     }
@@ -81,6 +104,12 @@ export async function createApp(options = {}) {
     const changing = !['GET', 'HEAD', 'OPTIONS'].includes(request.method);
     if (changing && request.headers['x-media-request'] !== '1') {
       throw new AppError('forbidden', 'This request was rejected.', 403);
+    }
+    if (!tokenRequired || request.method === 'GET' || request.method === 'HEAD' || request.method === 'OPTIONS') {
+      return;
+    }
+    if (!accessTokenMatches(readAccessToken(request), config.accessToken)) {
+      throw new AppError('unauthorized', 'This server requires an access token.', 401);
     }
   });
 
@@ -123,7 +152,9 @@ export async function createApp(options = {}) {
     tools: {
       ytdlp: Boolean(tools.ytdlp),
       ffmpeg: Boolean(tools.ffmpeg),
+      spotdl: Boolean(tools.spotdl),
     },
+    auth: { required: tokenRequired },
   }));
 
   const ctx = { app, config, storage, streams, media, validation, tools, log };
@@ -132,6 +163,13 @@ export async function createApp(options = {}) {
   app.get('/', async (request, reply) => sendPublic(reply, 'index.html', 'text/html; charset=utf-8'));
   app.get('/styles.css', async (request, reply) => sendPublic(reply, 'styles.css', 'text/css; charset=utf-8'));
   app.get('/app.js', async (request, reply) => sendPublic(reply, 'app.js', 'text/javascript; charset=utf-8'));
+  app.get('/fonts/:file', async (request, reply) => {
+    const file = String(request.params.file || '');
+    if (!/^JetBrainsMono-(Regular|SemiBold|Bold)\.woff2$/.test(file)) {
+      return reply.code(404).type('text/plain').send('Not found');
+    }
+    return sendPublic(reply, path.join('fonts', file), 'font/woff2');
+  });
   app.get('/favicon.ico', async (request, reply) => reply.code(204).send());
 
   let timer = null;

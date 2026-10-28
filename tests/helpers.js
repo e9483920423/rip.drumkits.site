@@ -32,6 +32,8 @@ export function workspace(overrides = {}) {
     CLEANUP_INTERVAL_MINUTES: '0',
     WORKER_SHUTDOWN_SECONDS: '2',
     RATE_LIMIT_PER_MINUTE: '600',
+    RATE_LIMIT_INSPECT_PER_MINUTE: '600',
+    RATE_LIMIT_DOWNLOAD_PER_MINUTE: '600',
     ...overrides,
   }, dir);
   return {
@@ -64,20 +66,22 @@ export function mockMedia(impl = {}) {
         entries: [],
       };
     },
-    async stream({ onFirstByte, workDir }) {
+    async stream({ onReady, onFirstByte, workDir }) {
       if (workDir) fs.mkdirSync(workDir, { recursive: true });
       const buf = mediaBuffer('m4a');
+      onReady?.({ bytes: buf.length, ext: 'm4a' });
       onFirstByte?.(buf);
       return { bytes: buf.length, ext: 'm4a' };
     },
-    async zip({ onFirstByte, workDir }) {
+    async zip({ onReady, onFirstByte, workDir }) {
       if (workDir) fs.mkdirSync(workDir, { recursive: true });
       const buf = Buffer.from('PK\x03\x04fixture');
+      onReady?.({ bytes: buf.length, ext: 'zip' });
       onFirstByte?.(buf);
       return { bytes: buf.length, ext: 'zip' };
     },
     async probe() {
-      return { ytdlp: true, ffmpeg: true };
+      return { ytdlp: true, ffmpeg: true, spotdl: true };
     },
     ...impl,
   };
@@ -89,7 +93,7 @@ export async function testApp(overrides = {}, options = {}) {
     config: space.config,
     validation: options.validation || validationWith(options.request, options.lookup),
     media: options.media === undefined ? mockMedia() : options.media,
-    tools: options.tools || { ytdlp: true, ffmpeg: true },
+    tools: options.tools || { ytdlp: true, ffmpeg: true, spotdl: true },
     now: options.now,
     log: silentLog,
   });

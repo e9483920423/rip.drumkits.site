@@ -20,6 +20,15 @@ const SOUNDCLOUD_HOSTS = new Set([
   'm.soundcloud.com',
   'on.soundcloud.com',
 ]);
+const SPOTIFY_HOSTS = new Set([
+  'open.spotify.com',
+  'play.spotify.com',
+  'www.play.spotify.com',
+  'spotify.com',
+  'www.spotify.com',
+  'spotify.link',
+]);
+const SPOTIFY_ID = /^[0-9A-Za-z]{22}$/;
 const SOUNDCLOUD_RESERVED = new Set([
   'discover',
   'feed',
@@ -138,17 +147,40 @@ function hostnameOf(value) {
   return String(value || '').toLowerCase().replace(/\.$/, '');
 }
 
+const EXTRA_SITE_HOSTS = new Map();
+
+function addHosts(source, hosts) {
+  for (const host of hosts) EXTRA_SITE_HOSTS.set(host, source);
+}
+
+addHosts('vimeo', ['vimeo.com', 'www.vimeo.com', 'player.vimeo.com']);
+addHosts('twitch', ['twitch.tv', 'www.twitch.tv', 'm.twitch.tv', 'clips.twitch.tv']);
+addHosts('bilibili', ['bilibili.com', 'www.bilibili.com', 'm.bilibili.com', 'b23.tv', 'www.b23.tv']);
+addHosts('reddit', ['reddit.com', 'www.reddit.com', 'old.reddit.com', 'm.reddit.com', 'v.redd.it', 'redd.it']);
+addHosts('x', ['x.com', 'www.x.com', 'mobile.x.com', 'twitter.com', 'www.twitter.com', 'mobile.twitter.com']);
+addHosts('facebook', ['facebook.com', 'www.facebook.com', 'm.facebook.com', 'web.facebook.com', 'fb.watch']);
+addHosts('flickr', ['flickr.com', 'www.flickr.com', 'flic.kr']);
+addHosts('peertube', ['peertube.tv', 'framatube.org', 'video.blender.org', 'tilvids.com', 'tube.tchncs.de']);
+addHosts('dailymotion', ['dailymotion.com', 'www.dailymotion.com', 'dai.ly']);
+addHosts('ted', ['ted.com', 'www.ted.com', 'embed.ted.com']);
+
+function isBandcampHost(hostname) {
+  return hostname === 'bandcamp.com' || hostname.endsWith('.bandcamp.com');
+}
+
 function sourceFor(hostname) {
   if (YOUTUBE_HOSTS.has(hostname)) return 'youtube';
   if (SOUNDCLOUD_HOSTS.has(hostname)) return 'soundcloud';
-  return '';
+  if (SPOTIFY_HOSTS.has(hostname)) return 'spotify';
+  if (isBandcampHost(hostname)) return 'bandcamp';
+  return EXTRA_SITE_HOSTS.get(hostname) || '';
 }
 
-function invalid(message = 'Enter a valid YouTube or SoundCloud URL.') {
+function invalid(message = 'Enter a valid media URL.') {
   return new AppError('invalid_url', message, 400);
 }
 
-function unsupported(message = 'This URL is not a supported YouTube or SoundCloud item.') {
+function unsupported(message = 'This URL is not a supported media item.') {
   return new AppError('unsupported_url', message, 400);
 }
 
@@ -252,6 +284,333 @@ function parseSoundCloud(url, hostname) {
   return { url: canonical, source: 'soundcloud', id: track, kind: 'video', short: false };
 }
 
+function parseSpotify(url, hostname) {
+  const spotifyUnsupported = 'Submit a Spotify track, album, or playlist URL.';
+  if (hostname === 'spotify.link') {
+    const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+    if (parts.length !== 1 || !/^[A-Za-z0-9]+$/.test(parts[0])) {
+      throw unsupported(spotifyUnsupported);
+    }
+    return {
+      url: `https://spotify.link/${parts[0]}`,
+      source: 'spotify',
+      id: parts[0],
+      kind: 'video',
+      short: true,
+    };
+  }
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (parts[0] && /^intl-[a-z]{2}$/i.test(parts[0])) parts.shift();
+  if ((parts[0] || '').toLowerCase() === 'embed') parts.shift();
+  const type = (parts[0] || '').toLowerCase();
+  const id = parts[1] || '';
+  if (parts.length !== 2 || !SPOTIFY_ID.test(id)) {
+    throw unsupported(spotifyUnsupported);
+  }
+  if (type === 'track') {
+    return { url: `https://open.spotify.com/track/${id}`, source: 'spotify', id, kind: 'video' };
+  }
+  if (type === 'album' || type === 'playlist') {
+    return { url: `https://open.spotify.com/${type}/${id}`, source: 'spotify', id, kind: 'playlist' };
+  }
+  throw unsupported(spotifyUnsupported);
+}
+
+const BLOCKED_PAGES = new Set([
+  'login', 'signup', 'register', 'settings', 'account', 'oauth', 'authorize',
+  'search', 'explore', 'directory', 'home', 'feed', 'messages', 'notifications',
+  'premium', 'cart', 'checkout', 'manage', 'upload', 'live',
+]);
+
+function mediaItem(source, href, id, kind = 'video', extra = {}) {
+  return { url: href, source, id: String(id).slice(0, 128), kind, ...extra };
+}
+
+function shortItem(source, host, id) {
+  if (!/^[A-Za-z0-9_-]+$/.test(id)) throw unsupported();
+  return mediaItem(source, `https://${host}/${id}`, id, 'video', { short: true });
+}
+
+function parseVimeo(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'player.vimeo.com') {
+    if (parts.length !== 2 || parts[0].toLowerCase() !== 'video' || !/^\d+$/.test(parts[1])) {
+      throw unsupported('Submit a Vimeo video URL.');
+    }
+    return mediaItem('vimeo', `https://vimeo.com/${parts[1]}`, parts[1]);
+  }
+  const head = (parts[0] || '').toLowerCase();
+  if (BLOCKED_PAGES.has(head) || head === 'ondemand' || head === 'watch') {
+    throw unsupported('Submit a Vimeo video or showcase URL.');
+  }
+  if (parts.length >= 1 && parts.length <= 2 && /^\d+$/.test(parts[0])) {
+    const suffix = parts[1] && /^[A-Za-z0-9]+$/.test(parts[1]) ? `/${parts[1]}` : '';
+    return mediaItem('vimeo', `https://vimeo.com/${parts[0]}${suffix}`, parts[0]);
+  }
+  if (parts.length === 2 && head === 'video' && /^\d+$/.test(parts[1])) {
+    return mediaItem('vimeo', `https://vimeo.com/${parts[1]}`, parts[1]);
+  }
+  if (parts.length === 2 && (head === 'showcase' || head === 'album') && /^[A-Za-z0-9_-]+$/.test(parts[1])) {
+    return mediaItem('vimeo', `https://vimeo.com/${head}/${parts[1]}`, parts[1], 'playlist');
+  }
+  if (parts.length === 3 && head === 'channels' && /^\d+$/.test(parts[2])) {
+    assertSegment(parts[1]);
+    return mediaItem('vimeo', `https://vimeo.com/${parts[2]}`, parts[2]);
+  }
+  throw unsupported('Submit a Vimeo video or showcase URL.');
+}
+
+function parseTwitch(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'clips.twitch.tv') {
+    if (parts.length !== 1) throw unsupported('Submit a Twitch VOD or clip URL.');
+    assertSegment(parts[0]);
+    return mediaItem('twitch', `https://clips.twitch.tv/${parts[0]}`, parts[0]);
+  }
+  const head = (parts[0] || '').toLowerCase();
+  if (!head || BLOCKED_PAGES.has(head) || ['p', 'downloads', 'inventory', 'subscriptions'].includes(head)) {
+    throw unsupported('Submit a Twitch VOD or clip URL.');
+  }
+  if (head === 'videos' && parts.length === 2 && /^\d+$/.test(parts[1])) {
+    return mediaItem('twitch', `https://www.twitch.tv/videos/${parts[1]}`, parts[1]);
+  }
+  if (parts.length === 3 && parts[1].toLowerCase() === 'clip') {
+    assertSegment(parts[0]);
+    assertSegment(parts[2]);
+    return mediaItem('twitch', `https://www.twitch.tv/${encodeURIComponent(parts[0])}/clip/${encodeURIComponent(parts[2])}`, parts[2]);
+  }
+  if (parts.length === 3 && parts[1].toLowerCase() === 'video' && /^\d+$/.test(parts[2])) {
+    return mediaItem('twitch', `https://www.twitch.tv/videos/${parts[2]}`, parts[2]);
+  }
+  throw unsupported('Submit a Twitch VOD or clip URL. Live channels are not supported.');
+}
+
+function parseBilibili(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'b23.tv' || hostname === 'www.b23.tv') {
+    if (parts.length !== 1) throw unsupported('Submit a Bilibili video URL.');
+    return shortItem('bilibili', 'b23.tv', parts[0]);
+  }
+  const head = (parts[0] || '').toLowerCase();
+  if (BLOCKED_PAGES.has(head) || head === 'space' || head === 'festival') {
+    throw unsupported('Submit a Bilibili video URL.');
+  }
+  if (head === 'video' && parts.length === 2 && /^(BV[0-9A-Za-z]+|av\d+)$/i.test(parts[1])) {
+    return mediaItem('bilibili', `https://www.bilibili.com/video/${parts[1]}`, parts[1]);
+  }
+  if (head === 'bangumi' && parts.length === 3 && parts[1].toLowerCase() === 'play' && /^(ep|ss)\d+$/i.test(parts[2])) {
+    return mediaItem('bilibili', `https://www.bilibili.com/bangumi/play/${parts[2]}`, parts[2]);
+  }
+  throw unsupported('Submit a Bilibili video URL.');
+}
+
+function parseReddit(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'v.redd.it' || hostname === 'redd.it') {
+    if (parts.length !== 1) throw unsupported('Submit a Reddit video post URL.');
+    return shortItem('reddit', hostname, parts[0]);
+  }
+  if (parts.length >= 4 && parts[0].toLowerCase() === 'r' && parts[2].toLowerCase() === 'comments') {
+    assertSegment(parts[1]);
+    assertSegment(parts[3]);
+    const slug = parts[4] ? `/${encodeURIComponent(parts[4])}` : '';
+    return mediaItem(
+      'reddit',
+      `https://www.reddit.com/r/${encodeURIComponent(parts[1])}/comments/${encodeURIComponent(parts[3])}${slug}`,
+      parts[3],
+    );
+  }
+  if (parts.length === 4 && parts[0].toLowerCase() === 'r' && parts[2].toLowerCase() === 's') {
+    assertSegment(parts[1]);
+    assertSegment(parts[3]);
+    return mediaItem(
+      'reddit',
+      `https://www.reddit.com/r/${encodeURIComponent(parts[1])}/s/${encodeURIComponent(parts[3])}`,
+      parts[3],
+      'video',
+      { short: true },
+    );
+  }
+  throw unsupported('Submit a Reddit video post URL.');
+}
+
+function parseX(url) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  let statusId = '';
+  if (parts.length === 3 && parts[1].toLowerCase() === 'status' && /^\d{5,20}$/.test(parts[2])) {
+    assertSegment(parts[0]);
+    statusId = parts[2];
+  } else if (parts.length === 3 && parts[0].toLowerCase() === 'i' && parts[1].toLowerCase() === 'status' && /^\d{5,20}$/.test(parts[2])) {
+    statusId = parts[2];
+  } else if (parts.length === 4 && parts[0].toLowerCase() === 'i' && parts[1].toLowerCase() === 'web' && parts[2].toLowerCase() === 'status' && /^\d{5,20}$/.test(parts[3])) {
+    statusId = parts[3];
+  } else {
+    throw unsupported('Submit a public X video post URL.');
+  }
+  return mediaItem('x', `https://x.com/i/status/${statusId}`, statusId);
+}
+
+function parseFacebook(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'fb.watch') {
+    if (parts.length !== 1) throw unsupported('Submit a Facebook video URL.');
+    return shortItem('facebook', 'fb.watch', parts[0]);
+  }
+  const head = (parts[0] || '').toLowerCase();
+  if (BLOCKED_PAGES.has(head)) throw unsupported('Submit a Facebook video URL.');
+  const watchId = url.searchParams.get('v') || '';
+  if (head === 'watch' && /^\d+$/.test(watchId)) {
+    return mediaItem('facebook', `https://www.facebook.com/watch/?v=${watchId}`, watchId);
+  }
+  if (head === 'watch' && parts.length === 2 && /^[A-Za-z0-9_-]+$/.test(parts[1])) {
+    return mediaItem('facebook', `https://www.facebook.com/watch/${parts[1]}`, parts[1]);
+  }
+  if ((head === 'reel' || head === 'reels') && parts.length === 2 && /^[A-Za-z0-9_-]+$/.test(parts[1])) {
+    return mediaItem('facebook', `https://www.facebook.com/reel/${parts[1]}`, parts[1]);
+  }
+  if (parts.length === 3 && parts[1].toLowerCase() === 'videos' && /^[A-Za-z0-9_-]+$/.test(parts[2])) {
+    assertSegment(parts[0]);
+    return mediaItem(
+      'facebook',
+      `https://www.facebook.com/${encodeURIComponent(parts[0])}/videos/${parts[2]}`,
+      parts[2],
+    );
+  }
+  throw unsupported('Submit a Facebook video URL.');
+}
+
+function parseFlickr(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'flic.kr') {
+    if (parts.length !== 2 || !['p', 's'].includes(parts[0].toLowerCase())) {
+      throw unsupported('Submit a Flickr video URL.');
+    }
+    assertSegment(parts[1]);
+    return mediaItem('flickr', `https://flic.kr/${parts[0]}/${parts[1]}`, parts[1], 'video', { short: true });
+  }
+  if (parts[0]?.toLowerCase() !== 'photos' || parts.length < 3) {
+    throw unsupported('Submit a Flickr video URL.');
+  }
+  assertSegment(parts[1]);
+  const third = (parts[2] || '').toLowerCase();
+  if ((third === 'sets' || third === 'albums') && parts.length === 4 && /^[A-Za-z0-9_-]+$/.test(parts[3])) {
+    return mediaItem(
+      'flickr',
+      `https://www.flickr.com/photos/${encodeURIComponent(parts[1])}/${third}/${parts[3]}`,
+      parts[3],
+      'playlist',
+    );
+  }
+  if (!/^\d+$/.test(parts[2])) throw unsupported('Submit a Flickr video URL.');
+  return mediaItem(
+    'flickr',
+    `https://www.flickr.com/photos/${encodeURIComponent(parts[1])}/${parts[2]}`,
+    parts[2],
+  );
+}
+
+function parsePeertube(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  const head = (parts[0] || '').toLowerCase();
+  if (BLOCKED_PAGES.has(head) || ['c', 'a', 'accounts', 'video-channels'].includes(head)) {
+    throw unsupported('Submit a PeerTube video or playlist URL.');
+  }
+  if (head === 'w' && parts.length === 2) {
+    assertSegment(parts[1]);
+    return mediaItem('peertube', `https://${hostname}/w/${parts[1]}`, parts[1]);
+  }
+  if (head === 'w' && parts.length === 3 && parts[1].toLowerCase() === 'p') {
+    assertSegment(parts[2]);
+    return mediaItem('peertube', `https://${hostname}/w/p/${parts[2]}`, parts[2], 'playlist');
+  }
+  if (head === 'videos' && parts.length === 3 && parts[1].toLowerCase() === 'watch') {
+    assertSegment(parts[2]);
+    return mediaItem('peertube', `https://${hostname}/videos/watch/${parts[2]}`, parts[2]);
+  }
+  if (head === 'videos' && parts.length === 4 && parts[1].toLowerCase() === 'watch' && parts[2].toLowerCase() === 'playlist') {
+    assertSegment(parts[3]);
+    return mediaItem('peertube', `https://${hostname}/videos/watch/playlist/${parts[3]}`, parts[3], 'playlist');
+  }
+  throw unsupported('Submit a PeerTube video or playlist URL.');
+}
+
+function parseDailymotion(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  if (hostname === 'dai.ly') {
+    if (parts.length !== 1) throw unsupported('Submit a Dailymotion video URL.');
+    return shortItem('dailymotion', 'dai.ly', parts[0]);
+  }
+  const head = (parts[0] || '').toLowerCase();
+  if (head === 'video' && parts.length === 2) {
+    assertSegment(parts[1]);
+    return mediaItem('dailymotion', `https://www.dailymotion.com/video/${parts[1]}`, parts[1]);
+  }
+  if (head === 'playlist' && parts.length === 2) {
+    assertSegment(parts[1]);
+    return mediaItem('dailymotion', `https://www.dailymotion.com/playlist/${parts[1]}`, parts[1], 'playlist');
+  }
+  throw unsupported('Submit a Dailymotion video or playlist URL.');
+}
+
+const BANDCAMP_RESERVED_SUBS = new Set([
+  'www', 'daily', 'support', 'help', 'video', 'blog', 'instagram', 'merch', 'shop', 'community',
+]);
+
+function parseBandcamp(url, hostname) {
+  const labels = hostname.split('.');
+  const artist = labels[0] || '';
+  if (labels.length !== 3 || BANDCAMP_RESERVED_SUBS.has(artist)) {
+    throw unsupported('Submit a Bandcamp album or track URL.');
+  }
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i.test(artist)) {
+    throw unsupported('Submit a Bandcamp album or track URL.');
+  }
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  const head = (parts[0] || '').toLowerCase();
+  if (parts.length !== 2 || (head !== 'album' && head !== 'track')) {
+    throw unsupported('Submit a Bandcamp album or track URL.');
+  }
+  assertSegment(parts[1]);
+  return mediaItem(
+    'bandcamp',
+    `https://${artist}.bandcamp.com/${head}/${encodeURIComponent(parts[1])}`,
+    parts[1],
+    head === 'album' ? 'playlist' : 'video',
+  );
+}
+
+function parseTed(url, hostname) {
+  const parts = url.pathname.split('/').filter(Boolean).map(decodePart);
+  const head = (parts[0] || '').toLowerCase();
+  if (head === 'talks' && parts.length === 2) {
+    assertSegment(parts[1]);
+    return mediaItem('ted', `https://www.ted.com/talks/${encodeURIComponent(parts[1])}`, parts[1]);
+  }
+  if (head === 'playlists' && parts.length >= 2 && /^\d+$/.test(parts[1])) {
+    const slug = parts[2] ? `/${encodeURIComponent(parts[2])}` : '';
+    return mediaItem('ted', `https://www.ted.com/playlists/${parts[1]}${slug}`, parts[1], 'playlist');
+  }
+  if (hostname === 'embed.ted.com' && head === 'talks' && parts.length === 2) {
+    assertSegment(parts[1]);
+    return mediaItem('ted', `https://www.ted.com/talks/${encodeURIComponent(parts[1])}`, parts[1]);
+  }
+  throw unsupported('Submit a TED talk or playlist URL.');
+}
+
+const EXTRA_PARSERS = {
+  vimeo: parseVimeo,
+  twitch: parseTwitch,
+  bilibili: parseBilibili,
+  reddit: parseReddit,
+  x: parseX,
+  facebook: parseFacebook,
+  flickr: parseFlickr,
+  peertube: parsePeertube,
+  dailymotion: parseDailymotion,
+  ted: parseTed,
+  bandcamp: parseBandcamp,
+};
+
 export function parseMediaUrl(input) {
   if (typeof input !== 'string') throw invalid();
   const text = input.trim();
@@ -269,7 +628,11 @@ export function parseMediaUrl(input) {
   const source = sourceFor(hostname);
   if (!source) throw unsupported();
   if (source === 'youtube') return parseYoutube(url, hostname);
-  return parseSoundCloud(url, hostname);
+  if (source === 'soundcloud') return parseSoundCloud(url, hostname);
+  if (source === 'spotify') return parseSpotify(url, hostname);
+  const extra = EXTRA_PARSERS[source];
+  if (!extra) throw unsupported();
+  return extra(url, hostname);
 }
 
 function withTimeout(promise, ms, message) {

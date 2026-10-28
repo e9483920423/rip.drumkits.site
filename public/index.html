@@ -8,7 +8,9 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <h1>rip.drumkits.site</h1>
+  <h1>
+    rip.<a href="https://www.drumkits.site" class="hover-link">drumkits.site</a>
+  </h1>
 
   <section id="banner" class="box" hidden></section>
 
@@ -16,10 +18,14 @@
     <form id="inspect-form" class="box">
       <h2>link</h2>
       <label for="url">media url</label>
-      <input id="url" name="url" type="url" inputmode="url" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off" spellcheck="false" required>
+      <input id="url" name="url" type="url" inputmode="url" placeholder="paste a supported media url" autocomplete="off" spellcheck="false" required>
+      <div id="token-row" hidden>
+        <label for="access-token">access token</label>
+        <input id="access-token" name="access-token" type="password" autocomplete="off" spellcheck="false">
+      </div>
       <div class="actions">
         <button type="button" id="paste">paste</button>
-        <button type="submit" id="inspect">download</button>
+        <button type="submit" id="inspect" aria-live="polite"><span class="inspect-label">inspect</span></button>
       </div>
       <p id="form-error" class="error" role="alert" hidden></p>
     </form>
@@ -29,6 +35,9 @@
       <p id="source" class="muted"></p>
       <h2 id="title"></h2>
       <p id="meta" class="muted"></p>
+      <div class="actions">
+        <button type="button" id="rym" hidden>find cover on RYM</button>
+      </div>
       <div id="tracks" hidden>
         <div class="actions">
           <button type="button" id="select-all">select all</button>
@@ -39,12 +48,45 @@
       </div>
       <label for="format">format</label>
       <select id="format"></select>
-      <button type="button" id="download">download</button>
+      <button type="button" id="download" aria-live="polite"><span class="download-label">download</span></button>
       <p id="preview-error" class="error" role="alert" hidden></p>
     </section>
   </div>
 
-  <p class="note">the file is sent to your browser. nothing is kept on this server. pick tracks from a playlist or set and they are zipped.</p>
+  <details class="box sites">
+    <summary>
+      <span>what sites this support?</span>
+      <svg class="sites-arrow" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="square" stroke-linejoin="miter"/>
+      </svg>
+    </summary>
+    <ul class="sites-list">
+      <li><strong>YouTube</strong><span>videos and playlists</span></li>
+      <li><strong>SoundCloud</strong><span>tracks and sets</span></li>
+      <li><strong>Spotify</strong><span>tracks, albums, and playlists via spotDL</span></li>
+      <li><strong>Bandcamp</strong><span>tracks and albums</span></li>
+      <li><strong>Vimeo</strong><span>creator videos and showcases</span></li>
+      <li><strong>Twitch</strong><span>VODs and clips</span></li>
+      <li><strong>Bilibili</strong><span>videos and some collections</span></li>
+      <li><strong>Reddit</strong><span>video posts</span></li>
+      <li><strong>X</strong><span>publicly accessible video posts</span></li>
+      <li><strong>Facebook</strong><span>supported video pages</span></li>
+      <li><strong>Flickr</strong><span>videos hosted with photos</span></li>
+      <li><strong>PeerTube</strong><span>listed federated instances</span></li>
+      <li><strong>Dailymotion</strong><span>hosted videos</span></li>
+      <li><strong>TED</strong><span>talks and playlists</span></li>
+    </ul>
+    <p class="muted">yt-dlp ships well over a thousand extractors. this app only allowlists the hosts above, so random urls are rejected. live streams, logins, and cookie/drm bypass are not supported.</p>
+  </details>
+
+  <p class="note">the file is sent to your browser. nothing is kept on this server. pick tracks from a playlist, set, or album and they are zipped.</p>
+
+
+  <footer class="site-footer">
+    <a href="https://github.com/e9483920423/rip.drumkits.site" target="_blank" rel="noopener noreferrer" class="hover-link">GitHub</a>
+    <a href="https://www.drumkits.site" target="_blank" rel="noopener noreferrer" class="hover-link">drumkits.site</a>
+    <a href="https://buymeacoffee.com/kits4leaksp" target="_blank" rel="noopener noreferrer" class="hover-link">buymeacoffee</a>
+  </footer>
   <script type="module" src="/app.js"></script>
 </body>
 </html>

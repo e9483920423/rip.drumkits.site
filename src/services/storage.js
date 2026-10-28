@@ -78,11 +78,31 @@ export function verifyMediaFile(filePath, maxBytes) {
   return { bytes: stat.size, ext };
 }
 
-export function createStorage(config) {
+export function freeDiskBytes(dir) {
+  const stats = fs.statfsSync(dir);
+  const available = stats.bavail ?? stats.bfree;
+  return Number(available) * Number(stats.bsize);
+}
+
+export function createStorage(config, options = {}) {
   function ensureDirs() {
     for (const dir of [config.dataDir, config.tmpDir]) {
       fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
+  }
+
+  function assertFreeDisk(neededMb = 0) {
+    const minMb = Math.max(Number(config.minFreeDiskMb) || 0, Number(neededMb) || 0);
+    if (!minMb) return;
+    ensureDirs();
+    let free;
+    try {
+      free = (options.freeBytes || freeDiskBytes)(config.tmpDir);
+    } catch {
+      return;
+    }
+    if (!Number.isFinite(free) || free >= minMb * 1024 * 1024) return;
+    throw new AppError('disk_full', 'The server is out of disk space.', 507);
   }
 
   function workDir(jobId) {
@@ -133,6 +153,7 @@ export function createStorage(config) {
     removeWorkDir,
     workDir,
     cleanupTemps,
+    assertFreeDisk,
   };
 }
 
