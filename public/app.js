@@ -133,6 +133,10 @@ function fitActionButton(button) {
     button.style.width = '';
     return;
   }
+  if (!button.getClientRects().length) {
+    button.style.width = '';
+    return;
+  }
   const label = actionLabelEl(button);
   const styles = getComputedStyle(button);
   const extra = parseFloat(styles.paddingLeft)
@@ -439,8 +443,8 @@ function renderPreview(info, requestUrl) {
     els.format.value = remembered;
   }
   renderTracks(info);
-  updateDownloadLabel();
   show(els.preview, true);
+  updateDownloadLabel();
 }
 
 async function inspect(event) {
@@ -555,7 +559,10 @@ async function boot() {
   }
   show(els.workspace, true);
   fitInspectButton();
-  fitActionButton(els.download);
+  document.fonts?.ready?.then(() => {
+    fitInspectButton();
+    if (!els.preview.hidden) fitActionButton(els.download);
+  });
 }
 
 els.form.addEventListener('submit', inspect);

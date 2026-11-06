@@ -38,5 +38,6 @@ test('classifies inspect and download paths', () => {
   assert.equal(limitForPath('/api/media/info'), 'inspect');
   assert.equal(limitForPath('/api/media/download'), 'download');
   assert.equal(limitForPath('/api/media/download/abc'), 'download');
+  assert.equal(limitForPath('/api/audio/convert'), 'download');
   assert.equal(limitForPath('/api/health'), 'general');
 });

@@ -60,9 +60,13 @@ test('metadata and download arguments stay on a fixed allowlist', () => {
   assert.deepEqual(formatsFor('vimeo').map((item) => item.id), youtubeIds);
   assert.deepEqual(formatsFor('bandcamp').map((item) => item.id), soundcloudIds);
   assert.deepEqual(spotifyIds, ['audio', 'mp3', 'opus', 'flac']);
-  const spotifySave = buildSpotifySaveArgs('https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
+  const spotifySave = buildSpotifySaveArgs(
+    'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
+    path.join('tmp', 'inspect.spotdl'),
+  );
   assert.equal(spotifySave[0], 'save');
-  assert.equal(spotifySave[spotifySave.indexOf('--save-file') + 1], '-');
+  assert.equal(spotifySave[1], 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
+  assert.equal(spotifySave[spotifySave.indexOf('--save-file') + 1], path.join('tmp', 'inspect.spotdl'));
   assert.equal(spotifySave.some((arg) => /cookie|proxy|preload|yt-dlp-args/i.test(arg)), false);
   const spotifyDl = buildSpotifyDownloadArgs(config, {
     url: 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT',
@@ -70,6 +74,7 @@ test('metadata and download arguments stay on a fixed allowlist', () => {
     output: '01.{output-ext}',
   });
   assert.equal(spotifyDl.args[0], 'download');
+  assert.equal(spotifyDl.args[1], 'https://open.spotify.com/track/4cOdK2wGLETKBW3PvgPWqT');
   assert.equal(spotifyDl.args[spotifyDl.args.indexOf('--format') + 1], 'opus');
   assert.equal(spotifyDl.args[spotifyDl.args.indexOf('--output') + 1], '01.{output-ext}');
   assert.equal(spotifyDl.args.some((arg) => /cookie|proxy|preload|yt-dlp-args/i.test(arg)), false);
@@ -325,6 +330,28 @@ test('keeps a finished yt-dlp stream when the process exits 101', async () => {
     });
     assert.equal(result.ext, 'mp4');
     assert.ok(result.bytes > 0);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('zip times out if a track never finishes', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'md-zip-timeout-'));
+  const service = createMediaService({ ...config, jobTimeoutSeconds: 1 }, {
+    runProcess: () => new Promise(() => {}),
+  });
+  try {
+    await assert.rejects(
+      () => service.zip({
+        items: [{ url, title: 'One' }],
+        source: 'youtube',
+        format: 'mp4',
+        workDir: dir,
+        onFirstByte() {},
+        write() {},
+      }),
+      (error) => error.code === 'timeout',
+    );
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

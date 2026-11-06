@@ -97,7 +97,7 @@ export function loadConfig(env = process.env, cwd = process.cwd()) {
     maxZipItems: integer(env, 'MAX_ZIP_ITEMS', 20, 1, 50),
     maxZipSizeMb: integer(env, 'MAX_ZIP_SIZE_MB', 2048, 1, 10240),
     maxDurationSeconds: integer(env, 'MAX_DURATION_SECONDS', 7200, 1, 86400),
-    jobTimeoutSeconds: integer(env, 'JOB_TIMEOUT_SECONDS', 1800, 30, 86400),
+    jobTimeoutSeconds: integer(env, 'JOB_TIMEOUT_SECONDS', 1800, 1, 86400),
     fileRetentionHours: integer(env, 'FILE_RETENTION_HOURS', 24, 1, 8760),
     tempRetentionHours: integer(env, 'TEMP_RETENTION_HOURS', 6, 1, 8760),
     maxJobHistory: integer(env, 'MAX_JOB_HISTORY', 200, 10, 10000),

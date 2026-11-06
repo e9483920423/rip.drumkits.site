@@ -180,8 +180,13 @@ export function registerMediaRoutes(app, ctx) {
       ? `${ticket.title || 'playlist'}.zip`
       : `${ticket.title || 'download'}.${format.ext}`;
     const controller = new AbortController();
-    const abort = () => controller.abort();
-    request.raw.on('aborted', abort);
+    const timeoutError = new AppError('timeout', 'The download timed out.', 504);
+    const abortClient = () => controller.abort();
+    const abortTimeout = () => controller.abort(timeoutError);
+    request.raw.on('aborted', abortClient);
+    const timer = setTimeout(abortTimeout, ctx.config.jobTimeoutSeconds * 1000);
+    timer.unref?.();
+    ctx.log?.info('stream start', { ticket: id, mode: ticket.mode });
 
     reply.hijack();
     let started = false;
@@ -243,9 +248,11 @@ export function registerMediaRoutes(app, ctx) {
         jsonError(reply, error instanceof AppError ? error : new AppError('internal', 'Something went wrong.', 500));
       }
     } finally {
-      request.raw.off('aborted', abort);
+      clearTimeout(timer);
+      request.raw.off('aborted', abortClient);
       ctx.streams.end(id);
       ctx.storage.removeWorkDir(id);
+      ctx.log?.info('stream end', { ticket: id });
     }
   });
 }

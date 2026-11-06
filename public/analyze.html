@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="robots" content="noindex">
+  <title>bpm & key finder — rip.drumkits.site</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <h1>
+    rip.<a href="https://www.drumkits.site" class="hover-link">drumkits.site</a>
+  </h1>
+
+  <form id="analyze-form" class="box">
+    <h2>bpm & key finder</h2>
+    <p class="muted">drop an audio file. analysis runs in your browser. nothing is uploaded.</p>
+    <div id="dropzone" class="dropzone" tabindex="0" role="button">
+      <input id="file" type="file" accept="audio/*,.wav,.mp3,.m4a,.flac,.ogg,.opus,.webm" hidden>
+      <span id="drop-label">drop wav, mp3, m4a, flac, or ogg, or click to pick</span>
+    </div>
+    <div class="actions">
+      <button type="button" id="analyze-btn" disabled aria-live="polite"><span class="analyze-label">analyze</span></button>
+    </div>
+    <p id="status" class="muted" hidden></p>
+    <p id="form-error" class="error" role="alert" hidden></p>
+  </form>
+
+  <section id="results" class="box" hidden>
+    <p id="file-name" class="muted"></p>
+    <dl class="metrics">
+      <div>
+        <dt>bpm</dt>
+        <dd id="bpm"></dd>
+      </div>
+      <div>
+        <dt>key</dt>
+        <dd id="key"></dd>
+      </div>
+      <div>
+        <dt>duration</dt>
+        <dd id="duration"></dd>
+      </div>
+      <div>
+        <dt>loudness</dt>
+        <dd id="lufs"></dd>
+      </div>
+      <div>
+        <dt>key confidence</dt>
+        <dd id="confidence"></dd>
+      </div>
+    </dl>
+  </section>
+
+  <p class="note">the file never leaves this tab. bpm and key are estimates.</p>
+
+  <footer class="site-footer">
+    <a href="/" class="hover-link">downloader</a>
+    <a href="/audio" class="hover-link">audio</a>
+    <a href="https://github.com/e9483920423/rip.drumkits.site" target="_blank" rel="noopener noreferrer" class="hover-link">GitHub</a>
+    <a href="https://www.drumkits.site" target="_blank" rel="noopener noreferrer" class="hover-link">drumkits.site</a>
+    <a href="https://buymeacoffee.com/kits4leaksp" target="_blank" rel="noopener noreferrer" class="hover-link">buymeacoffee</a>
+  </footer>
+  <script type="module" src="/analyze.js"></script>
+</body>
+</html>

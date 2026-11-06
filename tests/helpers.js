@@ -94,6 +94,7 @@ export async function testApp(overrides = {}, options = {}) {
     validation: options.validation || validationWith(options.request, options.lookup),
     media: options.media === undefined ? mockMedia() : options.media,
     tools: options.tools || { ytdlp: true, ffmpeg: true, spotdl: true },
+    runProcess: options.runProcess,
     now: options.now,
     log: silentLog,
   });

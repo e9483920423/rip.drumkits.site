@@ -9,7 +9,7 @@ if (args.includes('--version') || args.includes('-V')) {
 
 const TRACK_A = '4cOdK2wGLETKBW3PvgPWqT';
 const TRACK_B = '0VjIjW4KwNqL3esKw4oRpg';
-const target = args.at(-1) || '';
+const target = args.find((arg) => /^https?:\/\//i.test(arg)) || args.at(-1) || '';
 const operation = args[0] || '';
 
 function song(id, name, listName) {
@@ -38,7 +38,11 @@ if (operation === 'save') {
       song(TRACK_B, 'Track Two', 'Fixture Playlist'),
     ]
     : [song(TRACK_A, 'Fixture Track', null)];
-  console.log(JSON.stringify(songs));
+  const json = JSON.stringify(songs);
+  const saveFlag = args.indexOf('--save-file');
+  const saveDest = saveFlag !== -1 ? args[saveFlag + 1] : '';
+  if (saveDest && saveDest !== '-') fs.writeFileSync(saveDest, json);
+  else console.log(json);
   process.exit(0);
 }
 

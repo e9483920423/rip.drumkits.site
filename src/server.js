@@ -2,12 +2,15 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import Fastify from 'fastify';
+import multipart from '@fastify/multipart';
 import { accessTokenRequired, isLoopbackHost, loadConfig } from './config.js';
 import { AppError } from './errors.js';
 import { createLogger } from './logger.js';
+import { registerAudioRoutes } from './routes/audio.js';
 import { registerMediaRoutes } from './routes/media.js';
 import { createMediaService } from './services/media.js';
 import { accessTokenMatches, readAccessToken } from './services/access-token.js';
+import { runProcess as defaultRunProcess } from './services/process.js';
 import { createRateLimiter, limitForPath } from './services/rate-limit.js';
 import { createStorage, isInside } from './services/storage.js';
 import { createStreamManager } from './services/streams.js';
@@ -17,7 +20,7 @@ const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const publicDir = path.join(rootDir, 'public');
 
 const SECURITY_HEADERS = {
-  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com https://i.scdn.co https://mosaic.scdn.co https://*.vimeocdn.com https://*.jtvnw.net https://*.hdslb.com https://*.redd.it https://*.redditmedia.com https://pbs.twimg.com https://*.fbcdn.net https://*.staticflickr.com https://*.dmcdn.net https://*.tedcdn.com https://images.ted.com https://*.bcbits.com; style-src 'self'; script-src 'self'; font-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
+  'content-security-policy': "default-src 'self'; img-src 'self' https://i.ytimg.com https://*.sndcdn.com https://i.scdn.co https://mosaic.scdn.co https://*.vimeocdn.com https://*.jtvnw.net https://*.hdslb.com https://*.redd.it https://*.redditmedia.com https://pbs.twimg.com https://*.fbcdn.net https://*.staticflickr.com https://*.dmcdn.net https://*.tedcdn.com https://images.ted.com https://*.bcbits.com; style-src 'self'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; worker-src 'self'; font-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'",
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
   'x-frame-options': 'DENY',
@@ -43,8 +46,9 @@ export async function createApp(options = {}) {
     lookup: options.lookup,
     request: options.request,
   });
+  const runProcess = options.runProcess || defaultRunProcess;
   const media = options.media || createMediaService(config, {
-    runProcess: options.runProcess,
+    runProcess,
     streamProcess: options.streamProcess,
   });
   const streams = options.streams || createStreamManager({
@@ -127,11 +131,14 @@ export async function createApp(options = {}) {
       return reply.code(error.status).send({ error: { code: error.code, message: error.message } });
     }
     const status = error.statusCode || 500;
-    if (status === 413) {
+    if (status === 413 || error.code === 'FST_REQ_FILE_TOO_LARGE') {
       return reply.code(413).send({ error: { code: 'too_large', message: 'The request is too large.' } });
     }
     if (status === 415) {
-      return reply.code(415).send({ error: { code: 'unsupported_media', message: 'Send JSON.' } });
+      const message = String(request.url).startsWith('/api/audio/')
+        ? 'Send a multipart file upload.'
+        : 'Send JSON.';
+      return reply.code(415).send({ error: { code: 'unsupported_media', message } });
     }
     if (status < 500) {
       return reply.code(status).send({ error: { code: 'bad_request', message: 'Invalid request.' } });
@@ -157,18 +164,63 @@ export async function createApp(options = {}) {
     auth: { required: tokenRequired },
   }));
 
-  const ctx = { app, config, storage, streams, media, validation, tools, log };
+  await app.register(multipart, {
+    attachFieldsToBody: false,
+    throwFileSizeLimit: true,
+    limits: {
+      files: 1,
+      fields: 8,
+      fileSize: config.maxFileSizeMb * 1024 * 1024,
+    },
+  });
+
+  const ctx = { app, config, storage, streams, media, validation, tools, log, runProcess };
   registerMediaRoutes(app, ctx);
+  registerAudioRoutes(app, ctx);
 
   app.get('/', async (request, reply) => sendPublic(reply, 'index.html', 'text/html; charset=utf-8'));
+  app.get('/analyze', async (request, reply) => sendPublic(reply, 'analyze.html', 'text/html; charset=utf-8'));
+  app.get('/audio', async (request, reply) => sendPublic(reply, 'audio.html', 'text/html; charset=utf-8'));
   app.get('/styles.css', async (request, reply) => sendPublic(reply, 'styles.css', 'text/css; charset=utf-8'));
   app.get('/app.js', async (request, reply) => sendPublic(reply, 'app.js', 'text/javascript; charset=utf-8'));
+  app.get('/analyze.js', async (request, reply) => sendPublic(reply, 'analyze.js', 'text/javascript; charset=utf-8'));
+  app.get('/analyze-worker.js', async (request, reply) => sendPublic(reply, 'analyze-worker.js', 'text/javascript; charset=utf-8'));
+  app.get('/audio.js', async (request, reply) => sendPublic(reply, 'audio.js', 'text/javascript; charset=utf-8'));
+  app.get('/audio-worker.js', async (request, reply) => sendPublic(reply, 'audio-worker.js', 'text/javascript; charset=utf-8'));
   app.get('/fonts/:file', async (request, reply) => {
     const file = String(request.params.file || '');
     if (!/^JetBrainsMono-(Regular|SemiBold|Bold)\.woff2$/.test(file)) {
       return reply.code(404).type('text/plain').send('Not found');
     }
     return sendPublic(reply, path.join('fonts', file), 'font/woff2');
+  });
+  app.get('/vendor/libsonare/:file', async (request, reply) => {
+    const file = String(request.params.file || '');
+    const types = {
+      'analysis.js': 'text/javascript; charset=utf-8',
+      'sonare-analysis.js': 'text/javascript; charset=utf-8',
+      'sonare-analysis.wasm': 'application/wasm',
+      NOTICE: 'text/plain; charset=utf-8',
+      LICENSE: 'text/plain; charset=utf-8',
+    };
+    if (!Object.hasOwn(types, file)) {
+      return reply.code(404).type('text/plain').send('Not found');
+    }
+    return sendPublic(reply, path.join('vendor', 'libsonare', file), types[file]);
+  });
+  app.get('/vendor/:pkg/:file', async (request, reply) => {
+    const pkg = String(request.params.pkg || '');
+    const file = String(request.params.file || '');
+    const allowed = {
+      mp3tag: { 'mp3tag.js': 'text/javascript; charset=utf-8', LICENSE: 'text/plain; charset=utf-8' },
+      loudness: { 'loudness.js': 'text/javascript; charset=utf-8', LICENSE: 'text/plain; charset=utf-8' },
+      'music-metadata': { 'music-metadata.js': 'text/javascript; charset=utf-8', LICENSE: 'text/plain; charset=utf-8' },
+    };
+    const types = allowed[pkg];
+    if (!types || !Object.hasOwn(types, file)) {
+      return reply.code(404).type('text/plain').send('Not found');
+    }
+    return sendPublic(reply, path.join('vendor', pkg, file), types[file]);
   });
   app.get('/favicon.ico', async (request, reply) => reply.code(204).send());
 

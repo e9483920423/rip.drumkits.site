@@ -45,5 +45,6 @@ export function createRateLimiter({ limit, windowMs, now = Date.now, maxKeys = 5
 export function limitForPath(pathname) {
   if (pathname === '/api/media/info') return 'inspect';
   if (pathname.startsWith('/api/media/download')) return 'download';
+  if (pathname === '/api/audio/convert') return 'download';
   return 'general';
 }

@@ -158,8 +158,14 @@ export function createStorage(config, options = {}) {
 }
 
 export function contentDisposition(filename) {
-  const safe = sanitizeFilename(filename).replace(/[\r\n"]/g, '');
-  return `attachment; filename="${safe}"; filename*=UTF-8''${encodeURIComponent(safe)}`;
+  const cleaned = sanitizeFilename(filename).replace(/[\r\n"]/g, '');
+  const ext = path.extname(cleaned);
+  const ascii = cleaned
+    .replace(/[^\x20-\x7E]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^[\s_]+|[\s_]+$/g, '');
+  const fallback = ascii && ascii !== ext ? ascii : `download${ext}`;
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(cleaned)}`;
 }
 
 export function mimeType(ext) {

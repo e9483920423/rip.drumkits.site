@@ -4,7 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { AppError } from '../src/errors.js';
 import { createApp } from '../src/server.js';
-import { call, mockMedia, testApp, workspace, validationWith, silentLog } from './helpers.js';
+import { call, mockMedia, testApp, workspace, validationWith, silentLog, waitFor } from './helpers.js';
 
 const VIDEO = 'https://www.youtube.com/watch?v=dQw4w9WgXcQ';
 
@@ -15,6 +15,9 @@ test('validates requests, streams a file, and hides internals', async () => {
     assert.equal(page.statusCode, 200);
     assert.match(page.body, /rip\.drumkits\.site/);
     assert.match(page.body, /src="\/app.js"/);
+    assert.match(page.body, /class="layout"/);
+    assert.match(page.body, /id="inspect-form"/);
+    assert.match(page.body, /id="preview"/);
     assert.match(page.body, /id="inspect"/);
     assert.match(page.body, /class="inspect-label">inspect</);
     assert.match(page.body, /class="download-label">download</);
@@ -30,11 +33,16 @@ test('validates requests, streams a file, and hides internals', async () => {
     assert.doesNotMatch(page.body, /unpkg|googleapis|cdnjs/);
     assert.match(page.headers['content-security-policy'], /default-src 'self'/);
     assert.match(page.headers['content-security-policy'], /font-src 'self'/);
+    assert.match(page.headers['content-security-policy'], /script-src 'self' 'wasm-unsafe-eval'/);
+    assert.match(page.headers['content-security-policy'], /worker-src 'self'/);
+    assert.match(page.body, /href="\/analyze"/);
+    assert.match(page.body, /href="\/audio"/);
     assert.equal(page.headers['x-frame-options'], 'DENY');
 
     const css = await ctx.app.inject({ method: 'GET', url: '/styles.css' });
     assert.equal(css.statusCode, 200);
     assert.match(css.body, /JetBrains Mono/);
+    assert.match(css.body, /#preview img[\s\S]*aspect-ratio:\s*1\s*\/\s*1/);
     assert.doesNotMatch(css.body, /unpkg|googleapis|cdnjs|fonts\.gstatic/);
     const font = await ctx.app.inject({ method: 'GET', url: '/fonts/JetBrainsMono-Regular.woff2' });
     assert.equal(font.statusCode, 200);
@@ -107,6 +115,199 @@ test('validates requests, streams a file, and hides internals', async () => {
       await broken.close();
       broken.space.remove();
     }
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('a hung download times out and frees the slot', async () => {
+  const ctx = await testApp({ JOB_TIMEOUT_SECONDS: '1' }, {
+    media: mockMedia({
+      async stream({ signal }) {
+        await new Promise((_, reject) => {
+          const fail = () => reject(signal?.reason || new Error('aborted'));
+          if (signal?.aborted) {
+            fail();
+            return;
+          }
+          signal.addEventListener('abort', fail, { once: true });
+        });
+      },
+    }),
+  });
+  try {
+    const created = await call(ctx.app, 'POST', '/api/media/download', { body: { url: VIDEO, format: 'audio' } });
+    assert.equal(created.statusCode, 200);
+    const hung = await call(ctx.app, 'GET', `/api/media/download/${created.json().ticket}`);
+    assert.equal(hung.statusCode, 504);
+    assert.equal(hung.json().error.code, 'timeout');
+
+    const next = await call(ctx.app, 'POST', '/api/media/download', { body: { url: VIDEO, format: 'audio' } });
+    assert.equal(next.statusCode, 200);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('serves the local bpm/key analyzer without CDN scripts', async () => {
+  const ctx = await testApp();
+  try {
+    const page = await ctx.app.inject({ method: 'GET', url: '/analyze' });
+    assert.equal(page.statusCode, 200);
+    assert.match(page.body, /bpm & key finder/);
+    assert.match(page.body, /src="\/analyze.js"/);
+    assert.match(page.body, /href="\/"/);
+    assert.match(page.body, /href="\/audio"/);
+    assert.match(page.body, /drop an audio file/);
+    assert.doesNotMatch(page.body, /unpkg|googleapis|cdnjs|jsdelivr/);
+    assert.doesNotMatch(page.body, /<script[^>]+src="https?:/);
+    assert.match(page.body, /href="\/styles.css"/);
+    assert.match(page.headers['content-security-policy'], /script-src 'self' 'wasm-unsafe-eval'/);
+    assert.match(page.headers['content-security-policy'], /worker-src 'self'/);
+
+    const client = await ctx.app.inject({ method: 'GET', url: '/analyze.js' });
+    assert.equal(client.statusCode, 200);
+    assert.match(client.body, /new Worker\('\/analyze-worker\.js'/);
+    assert.doesNotMatch(client.body, /unpkg|googleapis|cdnjs|jsdelivr/);
+
+    const worker = await ctx.app.inject({ method: 'GET', url: '/analyze-worker.js' });
+    assert.equal(worker.statusCode, 200);
+    assert.match(worker.body, /\/vendor\/libsonare\/analysis\.js/);
+    assert.match(worker.body, /detectBpm/);
+    assert.match(worker.body, /detectKey/);
+
+    const wasm = await ctx.app.inject({ method: 'GET', url: '/vendor/libsonare/sonare-analysis.wasm' });
+    assert.equal(wasm.statusCode, 200);
+    assert.match(wasm.headers['content-type'], /application\/wasm/);
+    const glue = await ctx.app.inject({ method: 'GET', url: '/vendor/libsonare/analysis.js' });
+    assert.equal(glue.statusCode, 200);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/libsonare/../app.js' })).statusCode, 404);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/libsonare/sonare.wasm' })).statusCode, 404);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+function tinyWav() {
+  const samples = 32;
+  const dataSize = samples * 2;
+  const buffer = Buffer.alloc(44 + dataSize);
+  buffer.write('RIFF', 0);
+  buffer.writeUInt32LE(36 + dataSize, 4);
+  buffer.write('WAVE', 8);
+  buffer.write('fmt ', 12);
+  buffer.writeUInt32LE(16, 16);
+  buffer.writeUInt16LE(1, 20);
+  buffer.writeUInt16LE(1, 22);
+  buffer.writeUInt32LE(8000, 24);
+  buffer.writeUInt32LE(16000, 28);
+  buffer.writeUInt16LE(2, 32);
+  buffer.writeUInt16LE(16, 34);
+  buffer.write('data', 36);
+  buffer.writeUInt32LE(dataSize, 40);
+  return buffer;
+}
+
+function multipartBody({ format, file, filename = 'tone.wav' }) {
+  const boundary = '----testboundary';
+  const chunks = [];
+  const push = (part) => chunks.push(Buffer.isBuffer(part) ? part : Buffer.from(part));
+  push(`--${boundary}\r\nContent-Disposition: form-data; name="format"\r\n\r\n${format}\r\n`);
+  if (file) {
+    push(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: audio/wav\r\n\r\n`);
+    push(file);
+    push('\r\n');
+  }
+  push(`--${boundary}--\r\n`);
+  return {
+    headers: { 'content-type': `multipart/form-data; boundary=${boundary}` },
+    payload: Buffer.concat(chunks),
+  };
+}
+
+test('serves the local audio tools page without CDN scripts', async () => {
+  const ctx = await testApp();
+  try {
+    const page = await ctx.app.inject({ method: 'GET', url: '/audio' });
+    assert.equal(page.statusCode, 200);
+    assert.match(page.body, />audio</);
+    assert.match(page.body, /src="\/audio.js"/);
+    assert.match(page.body, /href="\/"/);
+    assert.match(page.body, /href="\/analyze"/);
+    assert.match(page.body, /inspect and tags stay in your browser/);
+    assert.doesNotMatch(page.body, /unpkg|googleapis|cdnjs|jsdelivr/);
+    assert.doesNotMatch(page.body, /<script[^>]+src="https?:/);
+
+    const client = await ctx.app.inject({ method: 'GET', url: '/audio.js' });
+    assert.equal(client.statusCode, 200);
+    assert.match(client.body, /\/vendor\/mp3tag\/mp3tag\.js/);
+    assert.match(client.body, /\/vendor\/music-metadata\/music-metadata\.js/);
+    assert.match(client.body, /\/api\/audio\/convert/);
+    assert.doesNotMatch(client.body, /unpkg|googleapis|cdnjs|jsdelivr/);
+
+    const worker = await ctx.app.inject({ method: 'GET', url: '/audio-worker.js' });
+    assert.equal(worker.statusCode, 200);
+    assert.match(worker.body, /\/vendor\/loudness\/loudness\.js/);
+
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/mp3tag/mp3tag.js' })).statusCode, 200);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/loudness/loudness.js' })).statusCode, 200);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/music-metadata/music-metadata.js' })).statusCode, 200);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/mp3tag/../app.js' })).statusCode, 404);
+    assert.equal((await ctx.app.inject({ method: 'GET', url: '/vendor/loudness/secret.js' })).statusCode, 404);
+  } finally {
+    await ctx.close();
+    ctx.space.remove();
+  }
+});
+
+test('converts an uploaded wav with allowlisted ffmpeg args and deletes temps', async () => {
+  const wav = tinyWav();
+  const ctx = await testApp({}, {
+    runProcess: async (command, args, options = {}) => {
+      const out = args.at(-1);
+      if (typeof out === 'string') {
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, wav);
+      }
+      options.onLine?.('', true);
+      return { code: 0, stderr: '', stdout: '', timedOut: false, cancelled: false };
+    },
+  });
+  try {
+    const { headers, payload } = multipartBody({ format: 'wav', file: wav });
+    const denied = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/audio/convert',
+      headers,
+      payload,
+    });
+    assert.equal(denied.statusCode, 403);
+
+    const bad = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/audio/convert',
+      headers: { ...headers, 'x-media-request': '1' },
+      payload: multipartBody({ format: 'exe', file: wav }).payload,
+    });
+    assert.equal(bad.statusCode, 400);
+
+    const created = await ctx.app.inject({
+      method: 'POST',
+      url: '/api/audio/convert',
+      headers: { ...headers, 'x-media-request': '1' },
+      payload,
+    });
+    assert.equal(created.statusCode, 200);
+    assert.match(created.headers['content-disposition'], /attachment;/);
+    assert.equal(created.headers['content-type'], 'application/octet-stream');
+    assert.equal(created.rawPayload.subarray(0, 4).toString('ascii'), 'RIFF');
+    await waitFor(() => {
+      const leftover = fs.existsSync(ctx.config.tmpDir) ? fs.readdirSync(ctx.config.tmpDir) : [];
+      return leftover.length === 0;
+    });
   } finally {
     await ctx.close();
     ctx.space.remove();

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import { ZipFile } from 'yazl';
@@ -190,12 +191,15 @@ export function buildFileArgs(config, { url, formatId, source, output }) {
   };
 }
 
-export function buildSpotifySaveArgs(url) {
+export function buildSpotifySaveArgs(url, saveFile) {
+  if (typeof saveFile !== 'string' || !saveFile.endsWith('.spotdl')) {
+    throw new Error('Spotify save file must end with .spotdl');
+  }
   return [
     'save',
-    '--save-file', '-',
-    '--log-level', 'ERROR',
     url,
+    '--save-file', saveFile,
+    '--log-level', 'ERROR',
   ];
 }
 
@@ -203,6 +207,7 @@ export function buildSpotifyDownloadArgs(config, { url, formatId, output }) {
   const format = getFormat('spotify', formatId);
   const args = [
     'download',
+    url,
     '--format', format.ext,
     '--output', output,
     '--overwrite', 'force',
@@ -212,7 +217,6 @@ export function buildSpotifyDownloadArgs(config, { url, formatId, output }) {
     '--bitrate', 'disable',
   ];
   if (path.isAbsolute(config.ffmpegPath)) args.push('--ffmpeg', config.ffmpegPath);
-  args.push(url);
   return { format, args };
 }
 
@@ -656,12 +660,49 @@ export function classifyProcessFailure(result = {}, tool = 'yt-dlp') {
   return { code: 'download_failed', message: 'The download failed.', status: 422 };
 }
 
+function abortError(signal, inspect = false) {
+  const reason = signal?.reason;
+  if (reason instanceof AppError) return reason;
+  return inspect
+    ? new AppError('cancelled', 'The request was cancelled.', 400)
+    : new AppError('cancelled', 'The download was cancelled.', 409);
+}
+
 function throwIfAborted(signal) {
-  if (signal?.aborted) throw new AppError('cancelled', 'The download was cancelled.', 409);
+  if (signal?.aborted) throw abortError(signal);
 }
 
 function throwIfInspectAborted(signal) {
-  if (signal?.aborted) throw new AppError('cancelled', 'The request was cancelled.', 400);
+  if (signal?.aborted) throw abortError(signal, true);
+}
+
+function whenAborted(signal) {
+  return new Promise((_, reject) => {
+    const fail = () => reject(abortError(signal));
+    if (signal.aborted) {
+      fail();
+      return;
+    }
+    signal.addEventListener('abort', fail, { once: true });
+  });
+}
+
+function jobDeadline(signal, timeoutMs) {
+  const local = new AbortController();
+  const timer = setTimeout(() => {
+    local.abort(new AppError('timeout', 'The download timed out.', 504));
+  }, Math.max(1000, timeoutMs));
+  timer.unref?.();
+  const onParent = () => local.abort(signal?.reason);
+  signal?.addEventListener('abort', onParent, { once: true });
+  if (signal?.aborted) local.abort(signal.reason);
+  return {
+    signal: local.signal,
+    clear() {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onParent);
+    },
+  };
 }
 
 function remainingMs(deadline) {
@@ -705,16 +746,39 @@ function findOutputFile(workDir, prefix, preferredExt, maxBytes) {
   return null;
 }
 
-function writeZipToFile(zipfile, zipPath) {
+function writeZipToFile(zipfile, zipPath, { signal } = {}) {
   return new Promise((resolve, reject) => {
     const dest = fs.createWriteStream(zipPath);
-    const fail = (error) => {
-      dest.destroy();
-      reject(error);
+    let settled = false;
+    const done = (error) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener('abort', onAbort);
+      if (error) {
+        try {
+          dest.destroy();
+        } catch {
+          // The zip stream may already be closed.
+        }
+        try {
+          zipfile.outputStream.destroy();
+        } catch {
+          // yazl may already have ended.
+        }
+        reject(error);
+        return;
+      }
+      resolve();
     };
-    zipfile.outputStream.on('error', fail);
-    dest.on('error', fail);
-    dest.on('finish', resolve);
+    const onAbort = () => done(abortError(signal));
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+    zipfile.outputStream.on('error', (error) => done(error));
+    dest.on('error', (error) => done(error));
+    dest.on('finish', () => done());
     zipfile.outputStream.pipe(dest);
   });
 }
@@ -744,7 +808,7 @@ async function streamFile(filePath, { onFirstByte, write, signal, maxBytes }) {
     for await (const chunk of stream) {
       if (signal?.aborted) {
         stream.destroy();
-        throw new AppError('cancelled', 'The download was cancelled.', 409);
+        throw abortError(signal);
       }
       bytes += chunk.length;
       if (bytes > maxBytes) {
@@ -819,8 +883,11 @@ export function createMediaService(config, deps = {}) {
     throwIfInspectAborted(signal);
     const playlist = options.kind === 'playlist';
     const command = source === 'spotify' ? config.spotdlPath : config.ytdlpPath;
+    const saveFile = source === 'spotify'
+      ? path.join(config.tmpDir, `inspect-${randomUUID()}.spotdl`)
+      : null;
     const args = source === 'spotify'
-      ? buildSpotifySaveArgs(url)
+      ? buildSpotifySaveArgs(url, saveFile)
       : buildInfoArgs(url, {
         playlist,
         flat: playlist && source !== 'soundcloud' && source !== 'bandcamp',
@@ -828,23 +895,36 @@ export function createMediaService(config, deps = {}) {
       });
     let result;
     try {
+      if (saveFile) fs.mkdirSync(config.tmpDir, { recursive: true });
       result = await run(command, args, {
         timeoutMs: Math.min(config.jobTimeoutSeconds, playlist ? (source === 'soundcloud' || source === 'bandcamp' ? 120 : 90) : 60) * 1000,
         stdoutCap: playlist ? 8_000_000 : undefined,
         signal,
       });
+      if (signal?.aborted || result.cancelled) throw new AppError('cancelled', 'The request was cancelled.', 400);
+      if (result.timedOut) throw new AppError('timeout', 'Metadata lookup timed out.', 504);
+      if (result.code !== 0) throw failureFromResult(result, processTool(source));
+      if (source === 'spotify') {
+        const raw = saveFile && fs.existsSync(saveFile)
+          ? fs.readFileSync(saveFile, 'utf8')
+          : result.stdout;
+        return parseSpotifySavePayload(raw, config, { kind: playlist ? 'playlist' : 'video' });
+      }
+      return parseInfoPayload(result.stdout, source, config, { kind: playlist ? 'playlist' : 'video' });
     } catch (error) {
+      if (error instanceof AppError) throw error;
       if (signal?.aborted) throw new AppError('cancelled', 'The request was cancelled.', 400);
       if (error.code === 'ENOENT') throw new AppError('tools_missing', toolsMissingMessage(source), 503);
       throw new AppError('download_failed', 'Could not read media details.', 502);
+    } finally {
+      if (saveFile) {
+        try {
+          fs.unlinkSync(saveFile);
+        } catch {
+          // The inspect temp file is disposable.
+        }
+      }
     }
-    if (signal?.aborted || result.cancelled) throw new AppError('cancelled', 'The request was cancelled.', 400);
-    if (result.timedOut) throw new AppError('timeout', 'Metadata lookup timed out.', 504);
-    if (result.code !== 0) throw failureFromResult(result, processTool(source));
-    if (source === 'spotify') {
-      return parseSpotifySavePayload(result.stdout, config, { kind: playlist ? 'playlist' : 'video' });
-    }
-    return parseInfoPayload(result.stdout, source, config, { kind: playlist ? 'playlist' : 'video' });
   }
 
   async function stream({ url, source, format, workDir, signal, onReady, onFirstByte, write }) {
@@ -885,17 +965,20 @@ export function createMediaService(config, deps = {}) {
     const maxBytes = config.maxFileSizeMb * 1024 * 1024;
     let result;
     try {
-      result = await run(command, built.args, {
+      const running = run(command, built.args, {
         cwd: workDir,
         timeoutMs,
         signal,
       });
+      result = signal ? await Promise.race([running, whenAborted(signal)]) : await running;
     } catch (error) {
-      if (signal?.aborted) throw new AppError('cancelled', 'The download was cancelled.', 409);
+      if (error instanceof AppError) throw error;
+      if (signal?.aborted) throw abortError(signal);
       if (error.code === 'ENOENT') throw new AppError('tools_missing', toolsMissingMessage(source), 503);
       throw new AppError('download_failed', 'The download failed.', 422);
     }
-    if (signal?.aborted || result.cancelled) throw new AppError('cancelled', 'The download was cancelled.', 409);
+    if (signal?.aborted) throw abortError(signal);
+    if (result.cancelled) throw new AppError('cancelled', 'The download was cancelled.', 409);
     if (result.timedOut) throw new AppError('timeout', 'The download timed out.', 504);
     const found = findOutputFile(workDir, prefix, built.format.ext, maxBytes);
     if (!isSuccessfulFileResult(result, Boolean(found))) {
@@ -907,73 +990,80 @@ export function createMediaService(config, deps = {}) {
 
   async function zip({ items, source, format, workDir, signal, onReady, onFirstByte, write }) {
     throwIfAborted(signal);
+    const deadline = jobDeadline(signal, config.jobTimeoutSeconds * 1000);
+    const jobSignal = deadline.signal;
     const zipfile = new ZipFile();
     const zipPath = path.join(workDir, 'archive.zip');
-    const written = writeZipToFile(zipfile, zipPath);
+    const written = writeZipToFile(zipfile, zipPath, { signal: jobSignal });
+    written.catch(() => {});
     const failures = [];
-    const deadline = Date.now() + config.jobTimeoutSeconds * 1000;
+    const endsAt = Date.now() + config.jobTimeoutSeconds * 1000;
     const maxZipBytes = config.maxZipSizeMb * 1024 * 1024;
     let totalBytes = 0;
     let added = 0;
     let sizeCapped = false;
 
-    for (const [index, item] of items.entries()) {
-      throwIfAborted(signal);
-      const label = item.title || `track ${index + 1}`;
-      if (sizeCapped) {
-        failures.push(`${label}: zip size limit reached`);
-        continue;
-      }
-      const prefix = String(index + 1).padStart(2, '0');
-      try {
-        const file = await downloadToFile({
-          url: item.url,
-          source,
-          format,
-          workDir,
-          prefix,
-          signal,
-          timeoutMs: remainingMs(deadline),
-        });
-        if (totalBytes + file.bytes > maxZipBytes) {
-          sizeCapped = true;
+    try {
+      for (const [index, item] of items.entries()) {
+        throwIfAborted(jobSignal);
+        const label = item.title || `track ${index + 1}`;
+        if (sizeCapped) {
           failures.push(`${label}: zip size limit reached`);
           continue;
         }
-        const name = `${prefix}-${sanitizeFilename(item.title)}.${file.ext}`;
-        zipfile.addFile(file.path, name);
-        totalBytes += file.bytes;
-        added += 1;
-      } catch (error) {
-        if (error instanceof AppError && error.code === 'cancelled') {
-          zipfile.outputStream.destroy();
-          await written.catch(() => {});
-          throw error;
+        const prefix = String(index + 1).padStart(2, '0');
+        try {
+          const file = await downloadToFile({
+            url: item.url,
+            source,
+            format,
+            workDir,
+            prefix,
+            signal: jobSignal,
+            timeoutMs: remainingMs(endsAt),
+          });
+          if (totalBytes + file.bytes > maxZipBytes) {
+            sizeCapped = true;
+            failures.push(`${label}: zip size limit reached`);
+            continue;
+          }
+          const name = `${prefix}-${sanitizeFilename(item.title)}.${file.ext}`;
+          zipfile.addFile(file.path, name);
+          totalBytes += file.bytes;
+          added += 1;
+        } catch (error) {
+          if (error instanceof AppError && (error.code === 'cancelled' || error.code === 'timeout')) {
+            zipfile.outputStream.destroy();
+            await written.catch(() => {});
+            throw error;
+          }
+          const message = error instanceof AppError ? error.message : 'The download failed.';
+          failures.push(`${label}: ${message}`);
         }
-        const message = error instanceof AppError ? error.message : 'The download failed.';
-        failures.push(`${label}: ${message}`);
       }
-    }
 
-    if (added === 0) {
-      zipfile.outputStream.destroy();
-      await written.catch(() => {});
-      throw new AppError('download_failed', failures[0] || 'The download failed.', 422);
+      if (added === 0) {
+        zipfile.outputStream.destroy();
+        await written.catch(() => {});
+        throw new AppError('download_failed', failures[0] || 'The download failed.', 422);
+      }
+      if (failures.length) {
+        zipfile.addBuffer(Buffer.from(`${failures.join('\n')}\n`, 'utf8'), 'failed.txt');
+      }
+      zipfile.end();
+      await written;
+      const size = fs.statSync(zipPath).size;
+      onReady?.({ bytes: size, ext: 'zip' });
+      await streamFile(zipPath, {
+        onFirstByte,
+        write,
+        signal: jobSignal,
+        maxBytes: maxZipBytes,
+      });
+      return { bytes: size, ext: 'zip' };
+    } finally {
+      deadline.clear();
     }
-    if (failures.length) {
-      zipfile.addBuffer(Buffer.from(`${failures.join('\n')}\n`, 'utf8'), 'failed.txt');
-    }
-    zipfile.end();
-    await written;
-    const size = fs.statSync(zipPath).size;
-    onReady?.({ bytes: size, ext: 'zip' });
-    await streamFile(zipPath, {
-      onFirstByte,
-      write,
-      signal,
-      maxBytes: maxZipBytes,
-    });
-    return { bytes: size, ext: 'zip' };
   }
 
   return { probe, inspect, stream, zip };

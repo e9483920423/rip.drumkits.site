@@ -18,6 +18,11 @@ test('sanitizes display names and download headers', () => {
   assert.equal(header.includes('\n'), false);
   assert.equal(header.includes('\r'), false);
   assert.match(header, /^attachment;/);
+  const unicode = contentDisposition('こんにちは — live.mp4');
+  assert.match(unicode, /^attachment; filename="live\.mp4"/);
+  assert.match(unicode, /filename\*=UTF-8''/);
+  assert.equal(/filename="[^"]*"/.exec(unicode)[0].includes('こ'), false);
+  assert.doesNotThrow(() => Buffer.from(unicode, 'latin1'));
 });
 
 test('verifies media files and rejects unsafe ids', () => {
